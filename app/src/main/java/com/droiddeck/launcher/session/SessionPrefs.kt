@@ -1,6 +1,7 @@
 package com.droiddeck.launcher.session
 
 import android.content.Context
+import android.content.pm.ActivityInfo
 import androidx.annotation.StringRes
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.core.TextureFiltering
@@ -34,6 +35,22 @@ object SessionPrefs {
         if (inverted) BACK_QAM_THEN_MENU else BACK_MENU_THEN_QAM
 
     private fun prefs(context: Context) = context.getSharedPreferences("session", Context.MODE_PRIVATE)
+
+    val orientationOptions = listOf(
+        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE to R.string.setup_orientation_auto,
+        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE to R.string.setup_orientation_landscape,
+        ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE to R.string.setup_orientation_reverse,
+    )
+
+    fun orientation(context: Context): Int =
+        prefs(context).getInt("orientation", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE)
+            .takeIf { value -> orientationOptions.any { it.first == value } }
+            ?: ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+
+    fun setOrientation(context: Context, orientation: Int) {
+        require(orientationOptions.any { it.first == orientation })
+        prefs(context).edit().putInt("orientation", orientation).apply()
+    }
 
     /** Whether the launcher hides Android's status and navigation bars. */
     fun launcherFullscreen(context: Context): Boolean = prefs(context).getBoolean("launcherFullscreen", true)
@@ -114,9 +131,9 @@ object SessionPrefs {
 
     private fun hudKey(context: Context) = if (mangoappSession(context)) "hudDeck" else "hud"
 
-    /** A Steam session that runs Deck mode with its performance overlay (mangoapp). */
+    /** A Steam session with Deck mode's performance overlay (mangoapp). */
     private fun mangoappSession(context: Context) =
-        SessionState.mode == SessionService.MODE_STEAM && steamDeckMode(context) && mangoapp(context)
+        SessionState.mode == SessionService.MODE_STEAM && mangoapp(context)
 
     /** When enabled, a single Back opens Steam QAM and a double Back opens the session menu. */
     fun backActionsInverted(context: Context): Boolean = prefs(context).getBoolean("backActionsInverted", false)
@@ -439,22 +456,6 @@ object SessionPrefs {
         prefs(context).getString("steamController", CONTROLLER_DECK) ?: CONTROLLER_DECK
     fun setSteamController(context: Context, id: String) { prefs(context).edit().putString("steamController", id).apply() }
 
-    /** Runs the SteamOS gamepad client with its Quick Access performance controls. On by default (settleDeckModeDefault). */
-    fun steamDeckMode(context: Context): Boolean = prefs(context).getBoolean("steamDeckMode", true)
-    fun setSteamDeckMode(context: Context, on: Boolean) { prefs(context).edit().putBoolean("steamDeckMode", on).apply() }
-
-    /**
-     * Deck mode is the default: every install, new or from before, is moved to it once. An install
-     * from before 0.3.0 had off written down for it whether or not anyone chose it, so the move
-     * can't tell a choice from that default and moves everyone; turning it off afterwards sticks.
-     * Run once at process start, before anything reads or writes these prefs.
-     */
-    fun settleDeckModeDefault(context: Context) {
-        val p = prefs(context)
-        if (p.getBoolean("deckModeMoved", false)) return
-        p.edit().putBoolean("steamDeckMode", true).putBoolean("deckModeMoved", true).apply()
-    }
-
     /**
      * Deck mode's performance overlay (mangoapp, beside gamescope): the QAM's Overlay Level draws
      * through it. Off is the way out where Valve's mangoapp crashes (one Turnip build did).
@@ -586,24 +587,6 @@ object SessionPrefs {
             .onFailure { android.util.Log.e("GameEnvironment", "Could not update game environment", it) }
     }
 
-    /**
-     * The Steam client branch used for the first download and forced on the command line:
-     * "steamdeck_publicbeta" by default, or "publicbeta" when chosen with Deck mode off.
-     * Deck mode always takes the Deck branch, whatever was chosen:
-     * with -steamos3 the client picks its own branch as SteamOS does, and on publicbeta it settled
-     * on steamdeck_stable - an older client it then offered as a "Software Update" in every session,
-     * which applying turns into the exit-42 restart loop (seen on device 2026-09-30). Earlier, Deck
-     * mode on publicbeta also reinstalled the same client at every start (2026-09-23). On
-     * steamdeck_publicbeta the client finds no update. The choice applies with Deck mode off.
-     */
-    fun steamChannel(context: Context): String =
-        if (steamDeckMode(context)) "steamdeck_publicbeta"
-        else prefs(context).getString("steamChannel", null) ?: "steamdeck_publicbeta"
-
-    fun setSteamChannel(context: Context, id: String) {
-        prefs(context).edit().putString("steamChannel", id).apply()
-    }
-
     /** Whether opening DroidDeck starts a Steam session instead of showing the front end. */
     fun runSteamAtStartup(context: Context): Boolean = prefs(context).getBoolean("runSteamAtStartup", false)
 
@@ -612,8 +595,9 @@ object SessionPrefs {
     }
 
     /**
-     * The folders of the user's own Windows games (one game per subfolder), any number of them
-     * from anywhere on the device. The single folder an earlier build kept is carried in.
+     * The Games folders earlier builds let the user add (one game per subfolder); read only by
+     * GamesFolderMigration, which turns them into entries and clears them. The single folder an
+     * even earlier build kept is carried in.
      */
     fun addedGamesDirs(context: Context): List<String> {
         val p = prefs(context)
@@ -625,6 +609,26 @@ object SessionPrefs {
 
     fun setAddedGamesDirs(context: Context, dirs: List<String>) {
         prefs(context).edit().putString("addedGamesDirs", dirs.distinct().joinToString("\n")).remove("addedGamesDir").apply()
+    }
+
+    /**
+     * The Games folders earlier builds had (host path, guest path), still bound into the session so
+     * their games keep their paths; written once by GamesFolderMigration.
+     */
+    fun gameFolderBinds(context: Context): List<Pair<String, String>> =
+        (prefs(context).getString("gameFolderBinds", "") ?: "").split('\n').mapNotNull { line ->
+            line.split('\t').takeIf { it.size == 2 && it[0].isNotEmpty() && it[1].isNotEmpty() }?.let { it[0] to it[1] }
+        }
+
+    fun setGameFolderBinds(context: Context, binds: List<Pair<String, String>>) {
+        prefs(context).edit().putString("gameFolderBinds", binds.distinctBy { it.first }.joinToString("\n") { "${it.first}\t${it.second}" }).apply()
+    }
+
+    /** The Games folders were turned into entries (GamesFolderMigration); a record, not a gate. */
+    fun gamesFoldersMigrated(context: Context): Boolean = prefs(context).getBoolean("gamesFoldersMigrated", false)
+
+    fun setGamesFoldersMigrated(context: Context) {
+        prefs(context).edit().putBoolean("gamesFoldersMigrated", true).apply()
     }
 
     /**
@@ -892,6 +896,26 @@ object SessionPrefs {
 
     fun setPipAutoEnter(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean("pipAutoEnter", enabled).apply()
+    }
+
+    /** A foldable's unfolded panel shows the game above the Deck controls (SessionDisplay.unfoldedGameHeight). */
+    fun unfoldedControls(context: Context): Boolean = prefs(context).getBoolean("unfoldedControls", false)
+
+    fun setUnfoldedControls(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("unfoldedControls", enabled).apply()
+    }
+
+    const val SURFACE_STICK = "stick"
+    const val SURFACE_TRACKPAD = "trackpad"
+
+    /** The Deck controls' gamepad tab: what each side is - an analog stick or a Steam trackpad.
+     *  Left a stick and right a trackpad until changed, as a Deck is mostly played. */
+    fun gamepadSurface(context: Context, right: Boolean): String =
+        prefs(context).getString(if (right) "gamepadRight" else "gamepadLeft", null)
+            ?: if (right) SURFACE_TRACKPAD else SURFACE_STICK
+
+    fun setGamepadSurface(context: Context, right: Boolean, surface: String) {
+        prefs(context).edit().putString(if (right) "gamepadRight" else "gamepadLeft", surface).apply()
     }
 
     fun suspendPolicy(context: Context, mode: String): String =

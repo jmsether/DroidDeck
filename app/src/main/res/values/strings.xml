@@ -324,16 +324,8 @@
     <string name="mode_decky_remove_title">Uninstall Decky Loader?</string>
     <string name="mode_decky_remove_text">Removes the loader. Your plugins and settings are kept.</string>
     <string name="mode_client">Client</string>
-    <string name="mode_deck_mode">Steam Deck mode</string>
-    <string name="mode_deck_mode_hint">Steam\'s Deck interface and Quick Access performance controls. Applies next session.</string>
     <string name="mode_mangoapp">Performance overlay</string>
     <string name="mode_mangoapp_hint">Turn off if games crash or go black in Deck mode. Applies next session.</string>
-    <string name="mode_branch">Client branch</string>
-    <string name="mode_branch_deck">Steam Deck public beta (required by Deck mode).</string>
-    <string name="mode_branch_hint">Applies next session. Steam may update itself once.</string>
-    <string name="mode_branch_public">Public beta</string>
-    <string name="mode_branch_deck_beta">Steam Deck public beta</string>
-    <string name="mode_branch_note">Deck mode always uses Steam Deck public beta.</string>
     <string name="mode_steam_repair">Repair Steam client</string>
     <string name="mode_steam_repair_hint">Downloads the Steam client again the next time Steam starts. Use it if Steam stays on its loading screen. Games, sign-in and settings are kept.</string>
     <string name="mode_steam_repair_queued">The Steam client will be downloaded again the next time Steam starts.</string>
@@ -353,12 +345,29 @@
     <string name="wincomp_title">Windows components</string>
     <string name="wincomp_pad_hint">LB / RB jump between the sections.</string>
     <string name="wincomp_card_none">None</string>
-    <string name="wincomp_applies">Windows DLLs Proton does not include, from Bannerlator\'s component list. Turn on the ones this game needs: they go into the game\'s own Windows folder, never its files, and stay whichever Proton it runs on.</string>
+    <string name="wincomp_applies">Windows DLLs Proton does not include, from the component list. Turn on the ones this game needs: they go into the game\'s own Windows folder, never its files, and stay whichever Proton it runs on.</string>
     <string name="wincomp_offline">Could not reach the component list. Components already downloaded can still be switched.</string>
     <string name="wincomp_recommended">Recommended for this game</string>
+    <string name="wincomp_checking">Checking what this game needs…</string>
+    <string name="wincomp_when_online">Available when online</string>
+    <plurals name="wincomp_turning_on">
+        <item quantity="one">Turning on %1$d component…</item>
+        <item quantity="other">Turning on %1$d components…</item>
+    </plurals>
+    <string name="wincomp_auto_section">On for this game</string>
+    <string name="wincomp_auto_steam">Steam installs %1$s with %2$s (app %3$s)</string>
+    <string name="wincomp_auto_gog">From GOG\'s list for this game</string>
+    <string name="wincomp_auto_epic">From Epic\'s prerequisites for this game</string>
+    <string name="wincomp_auto_amazon">From Amazon\'s install steps for this game</string>
+    <string name="wincomp_steam_by_name">Steam installs %1$s with app %2$s, matched by name</string>
+    <string name="wincomp_suggestions">Also listed</string>
+    <string name="wincomp_suggestion_reason">Listed by %1$s; not a component here</string>
+    <string name="wincomp_src_steam">Steam</string>
+    <string name="wincomp_src_gog">GOG</string>
+    <string name="wincomp_src_epic">Epic Games</string>
+    <string name="wincomp_src_amazon">Amazon Games</string>
     <string name="wincomp_found_bundled">The game ships %1$s</string>
     <string name="wincomp_found_shipped">The game has %1$s (often works as is)</string>
-    <string name="wincomp_found_steam">Steam installs %1$s with this game</string>
     <string name="wincomp_already_here">Already in this game</string>
     <string name="wincomp_no_recommendation">Nothing in the game\'s folder points at a component.</string>
     <string name="wincomp_active">Installed for this game (%1$d)</string>
@@ -666,6 +675,10 @@
     <string name="setup_home">Use as Home screen</string>
     <string name="setup_home_on">DroidDeck can be the Home app</string>
     <string name="setup_home_off">DroidDeck is never offered as a Home app</string>
+    <string name="setup_orientation">Orientation</string>
+    <string name="setup_orientation_auto">Automatic landscape</string>
+    <string name="setup_orientation_landscape">Landscape</string>
+    <string name="setup_orientation_reverse">Reverse landscape</string>
     <string name="setup_fullscreen">Fullscreen</string>
     <string name="setup_fullscreen_on">Hides the Android status and navigation bars</string>
     <string name="setup_fullscreen_off">Shows the Android status and navigation bars</string>
@@ -880,6 +893,8 @@
     <string name="ctrl_steam_button">Steam button</string>
     <string name="ctrl_qam_button">QAM button</string>
     <string name="ctrl_keyboard_button">Keyboard button</string>
+    <string name="ctrl_select_steam">Press Select to open the Steam menu</string>
+    <string name="ctrl_select_steam_hint">Instead of View/Select.</string>
     <string name="setup_animations">Animations</string>
     <string name="ctrl_adaptive_hint">Sticks appear where you touch and hide on release</string>
     <string name="ctrl_layout">Layout</string>
@@ -927,6 +942,12 @@
     <string name="content_page_gone">That page is gone. Pick a section on the left.</string>
     <string name="content_open_desktop">Open desktop</string>
     <string name="content_install_open_desktop">Install &amp; open desktop</string>
+    <string name="desktop_remove_title">Uninstall desktop</string>
+    <string name="desktop_remove_text">Remove the desktop and its bundled apps. Keep games, added apps, settings and shared libraries.</string>
+    <string name="desktop_removing">Removing desktop</string>
+    <string name="desktop_removed">Desktop removed</string>
+    <string name="desktop_cleaning_legacy">Removing old LXQt files</string>
+    <string name="desktop_removal_unknown">Update DroidDeck before removing this desktop version.</string>
     <string name="content_linux_desktop">Linux desktop</string>
     <string name="content_linux_desktop_hint">KDE Plasma, Firefox and your emulators</string>
     <string name="games_empty">Games you install in Steam show up here after the session.</string>
@@ -998,6 +1019,12 @@
     <string name="deck_tab_left">Left pad</string>
     <string name="deck_tab_right">Right pad</string>
     <string name="deck_tab_both">Both</string>
+    <string name="deck_tab_gamepad">Gamepad</string>
+    <string name="deck_surface_stick">Stick</string>
+    <string name="deck_surface_trackpad">Trackpad</string>
+    <string name="deck_surface_switch">Switch between stick and trackpad</string>
+    <string name="deck_more_controls">More Deck controls</string>
+    <string name="deck_panels">PANELS</string>
     <string name="deck_close">Close second-screen controls</string>
     <string name="deck_open_steam_menu">Open Steam menu</string>
     <string name="deck_left_upper">Left · upper</string>
@@ -1061,6 +1088,8 @@
     <string name="game_env_eyebrow">Proton games</string>
     <string name="pip_title">Picture in picture</string>
     <string name="pip_auto">Automatically enter PiP</string>
+    <string name="unfolded_controls">Controls on the unfolded screen</string>
+    <string name="unfolded_controls_hint">Unfolded, the game sits above the Steam Deck trackpads and back grips. Folded, the game is full screen.</string>
     <string name="pip_suspended">Suspended</string>
     <string name="pip_not_ready">Picture in picture is available once the session is ready.</string>
     <string name="pip_permission">Allow picture in picture for DroidDeck in Android settings.</string>
@@ -1558,6 +1587,7 @@
     <!-- The on-screen button is not shown -->
     <string name="ctrl_target_hidden">Hidden</string>
     <string name="ctrl_editor_drag">Drag to move</string>
+    <string name="ctrl_editor_snap">Snap</string>
     <string name="ctrl_editor_save">Save</string>
     <!-- What the second screen shows during a session -->
     <string name="second_mode_none">None</string>

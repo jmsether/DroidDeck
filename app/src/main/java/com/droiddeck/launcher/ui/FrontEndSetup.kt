@@ -351,6 +351,11 @@ internal fun SetupPanel(
                                 if (s.homeScreenEnabled) stringResource(R.string.setup_home_on) else stringResource(R.string.setup_home_off),
                                 s.homeScreenEnabled,
                             ) { a.onHomeScreen(it) }
+                            ChoiceRow(
+                                host, "orientation", stringResource(R.string.setup_orientation), null,
+                                SessionPrefs.orientationOptions.map { (value, label) -> value to stringResource(label) },
+                                s.orientation, onPick = a.onOrientation,
+                            )
                             ToggleRow(
                                 host, "launcher-fullscreen", stringResource(R.string.setup_fullscreen),
                                 if (s.launcherFullscreen) stringResource(R.string.setup_fullscreen_on) else stringResource(R.string.setup_fullscreen_off),
@@ -505,6 +510,7 @@ internal fun LaunchSettings(s: FrontEndState, a: FrontEndActions, host: MenuHost
     if (opened != null && wincompKey != null && game != null) WinComponentsDialog(
         wincompKey, game.name, game.gameFiles, opened, compat = game.protonPrefix,
         steamAppId = game.appId.takeIf { game.library != com.droiddeck.launcher.frontend.Library.ADDED },
+        game = game,
     ) { wincompOpen = null }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
         for (row in cards.chunked(columns)) {
