@@ -186,7 +186,7 @@ class Pixel10Test(Sandbox):
 
     def test_probe_pushes_runs_and_keeps_the_output(self):
         binary = self.file("pvr_props_probe", elf())
-        adb = FakeAdb([("./pvr_props_probe", done(b"section.hal=exit=0\nhal.drm.state=untouched\nhal.fmt=BC7\n"))])
+        adb = FakeAdb([("./pvr_props_probe", done(b"section.loader=exit=0\nhal.drm.state=untouched\nhal.fmt=BC7\nsection.hal=exit=0\n"))])
         code, out, _ = self.quiet(pixel10.probe, adb, binary, "/vendor/lib64/hw/vulkan.powervr.so", self.out)
         self.assertEqual(code, 0)
         self.assertIn("hal.drm.state=untouched", out)
@@ -225,6 +225,16 @@ class Pixel10Test(Sandbox):
         self.assertEqual((self.out / "props.txt").read_bytes(), b"error: closed\n")  # kept for the user
         self.assertIn("pixel10:", err)
 
+    def test_probe_output_cut_short_is_not_a_success(self):
+        # The probe always prints a section.loader= and a section.hal= line; adb can exit 1 (a dropped link) between them.
+        for stdout in (b"section.loader=exit=0\n", b"hal.drm.state=untouched\nsection.hal=exit=0\n", b"probe.version=1\n"):
+            with self.subTest(stdout=stdout):
+                adb = FakeAdb([("./pvr_props_probe", done(stdout, 1))])
+                code, _, err = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+                self.assertEqual(code, 3)
+                self.assertIn("probe output cut short", err)
+                self.assertEqual((self.out / "props.txt").read_bytes(), stdout)  # kept for the user
+
     def test_probe_whose_section_died_still_reports_what_it_found(self):
         adb = FakeAdb([("./pvr_props_probe", done(b"section.loader=exit=0\nsection.hal=killed signal=11\n", 1))])
         code, out, _ = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
@@ -248,11 +258,11 @@ class Pixel10Test(Sandbox):
                  "hal.device.apiVersion=1.4.317", "hal.driver.info=25.3@6908880",
                  "hal.driver.release=25.3 build=6908880 build_matches_driverVersion=1"]
         noise = ["probe.version=1", "hal.ext=VK_KHR_driver_properties", "hal.fmt=BC7_UNORM_BLOCK optimal=0x0", "loader.device.name=x"]
-        stdout = "\n".join(["section.hal=exit=0", *noise[:2], *gates, *noise[2:]]).encode() + b"\n"
+        stdout = "\n".join(["section.loader=exit=0", *noise[:2], *gates, *noise[2:], "section.hal=exit=0"]).encode() + b"\n"
         adb = FakeAdb([("./pvr_props_probe", done(stdout))])
         code, out, _ = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
         self.assertEqual(code, 0)
-        self.assertEqual(out.splitlines()[:-1], ["section.hal=exit=0", *gates])
+        self.assertEqual(out.splitlines()[:-1], ["section.loader=exit=0", *gates, "section.hal=exit=0"])
 
     def test_logs_from_a_debuggable_build_take_the_newest_session(self):
         packed = tar_of({"2026-10-10-02-steam/session.log": b"hello"})
@@ -264,11 +274,15 @@ class Pixel10Test(Sandbox):
         self.assertIn("-C files/logs 2026-10-10-02-steam", [c for c in adb.calls if c[0] == "exec-out"][0][1])
 
     def test_logs_refuse_a_tar_that_escapes_the_output_folder(self):
-        evil = tar_of({"../evil.txt": b"x"})
-        adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")), ("exec-out", done(evil))])
-        with self.assertRaisesRegex(SystemExit, "outside the output folder"):
-            self.quiet(pixel10.logs, adb, self.out)
-        self.assertFalse((self.out.parent / "evil.txt").exists())
+        for name in ("../evil.txt", "/tmp/evil.txt"):
+            with self.subTest(member=name):
+                evil = tar_of({"2026-10-10-01-steam/ok.log": b"y", name: b"x"})
+                adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")), ("exec-out", done(evil))])
+                code, _, err = self.quiet(pixel10.logs, adb, self.out)
+                self.assertEqual(code, 3)
+                self.assertIn("outside the output folder", err)
+                self.assertFalse((self.out.parent / "evil.txt").exists())
+                self.assertEqual(list(self.out.iterdir()), [])  # the whole unpack was refused, not just the bad member
 
     def test_logs_that_got_error_text_instead_of_a_tar_are_exit_3(self):
         adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")),
@@ -292,6 +306,13 @@ class Pixel10Test(Sandbox):
         self.assertEqual(code, 0)
         pull = [c for c in adb.calls if c[0] == "pull"][0]
         self.assertEqual(pull[1], "/sdcard/Download/DroidDeck-2026-10-10-02-steam.zip")
+
+    def test_logs_from_a_phone_that_cannot_list_downloads_are_exit_3_not_advice(self):
+        adb = FakeAdb([("run-as", done(b"not debuggable", 1)), ("ls -t /sdcard/Download", done(b"", 124, b"timeout"))])
+        code, _, err = self.quiet(pixel10.logs, adb, self.out)
+        self.assertEqual(code, 3)
+        self.assertNotIn("Share logs", err)  # this is a phone problem, not a missing zip
+        self.assertIn("/sdcard/Download", err)
 
     def test_logs_without_any_route_say_how_to_make_one(self):
         adb = FakeAdb([("run-as", done(b"not debuggable", 1))])
@@ -411,7 +432,8 @@ class MainTest(Sandbox):
         self.assertEqual(self.fake.calls, [("install", "-r", "--no-incremental", str(apk))])
 
     def test_every_command_reaches_its_function_and_returns_its_exit_code(self):
-        self.fake.answers = [("", done(b"", 1, b"error: device offline"))]
+        # Every command fails except listing Download, so logs gets as far as the exit-4 advice.
+        self.fake.answers = [("ls -t /sdcard/Download", done()), ("", done(b"", 1, b"error: device offline"))]
         self.assertEqual(self.main("facts", "--out", str(self.out / "facts"))[0], 3)
         self.assertEqual(self.main("probe", str(self.file("p", elf())), "--hal", "/x/y.so", "--out", str(self.out / "probe"))[0], 3)
         self.assertEqual(self.main("install", str(self.file("a.apk", b"PK")))[0], 3)

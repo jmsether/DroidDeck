@@ -36,6 +36,7 @@ REMOTE = "/data/local/tmp/pixel10"
 SESSION_FOLDER = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{2,}-.+$")
 SHARE_ZIP = re.compile(r"^DroidDeck-.+\.zip$")
 TIMED_OUT = 124  # the exit status timeout(1) uses; what a command that outlived its time limit reports
+SECTIONS = ("loader", "hal")  # the probe prints a section.<name>= line for each, whatever the driver does
 # Probe lines echoed to the console: the ones the bring-up gates read. props.txt has everything.
 SUMMARY = re.compile(
     r"section\.|hal\.(driver\.|drm\.(state|fields)|device\.(version|apiVersion)|bc\.|queue\.(count|family)"
@@ -172,8 +173,8 @@ FILE_CHECKS = {"probe": probe_problem, "install": apk_problem}
 
 
 def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
-    """Exit 3 when the probe could not run (adb exit >= 124: timeout, not executable, killed) or printed no
-    section line; a section that died is itself a fact in props.txt, not a failure of this command."""
+    """Exit 3 when the probe could not run (adb exit >= 124: timeout, not executable, killed) or its output ends
+    before both section lines; a section that died is itself a fact in props.txt, not a failure of this command."""
     if refuse(probe_problem(binary)):
         return 2
     out.mkdir(parents=True, exist_ok=True)
@@ -190,10 +191,11 @@ def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
         if SUMMARY.match(line):
             print(line)
     print(f"probe output written to {out / 'props.txt'} (adb exit {ran.returncode})")
-    ran_sections = any(line.startswith("section.") for line in ran.stdout.decode("utf-8", "replace").splitlines())
-    if ran.returncode >= TIMED_OUT or not ran_sections:
-        print(f"pixel10: the probe produced no results (adb exit {ran.returncode}); see {out / 'props.stderr.txt'}",
-              file=sys.stderr)
+    lines = ran.stdout.decode("utf-8", "replace").splitlines()
+    ended = all(any(line.startswith(f"section.{name}=") for line in lines) for name in SECTIONS)
+    if ran.returncode >= TIMED_OUT or not ended:
+        print(f"pixel10: probe output cut short (adb exit {ran.returncode}); see {out / 'props.txt'} "
+              f"and {out / 'props.stderr.txt'}", file=sys.stderr)
         return 3
     return 0
 
@@ -208,7 +210,7 @@ def extract(data: bytes, out: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         for member in archive.getmembers():
             if member.name.startswith(("/", "\\")) or ".." in Path(member.name).parts:
-                raise SystemExit(f"pixel10: refusing tar member outside the output folder: {member.name}")
+                raise tarfile.TarError(f"refusing tar member outside the output folder: {member.name}")
         if hasattr(tarfile, "data_filter"):
             archive.extractall(out, filter="data")
         else:
@@ -234,8 +236,12 @@ def logs(adb: Adb, out: Path) -> int:
                 return 0
         print("pixel10: run-as works but no session folder could be read", file=sys.stderr)
         return 3
-    names = text(adb.shell("ls -t /sdcard/Download")).splitlines()
-    zips = [n for n in names if SHARE_ZIP.match(n)]
+    listed = adb.shell("ls -t /sdcard/Download")
+    if listed.returncode:  # an offline or hung phone is not the same as "no zip saved yet"
+        print(f"pixel10: could not list /sdcard/Download (adb exit {listed.returncode}):\n{text(listed)}", file=sys.stderr)
+        return 3
+    names = text(listed).splitlines()
+    zips =[n for n in names if SHARE_ZIP.match(n)]
     if zips:
         pulled = adb.run("pull", f"/sdcard/Download/{zips[0]}", str(out / zips[0]), timeout=300)
         print(text(pulled).strip())
