@@ -2,8 +2,11 @@
 
 ## Default on PowerVR: `HYBRIS_BC_TEXTURES=d3d`
 
-When the phone's own PowerVR driver is the game driver (no imported Linux driver), every game launch starts with `HYBRIS_BC_TEXTURES=d3d` and without Steam's
-Fossilize layer (`GameEnvironment.POWERVR`, published to `game-environment.json`), including native Linux games run through FEX. The `d3d`
+When the phone's own PowerVR driver is the game driver (no imported Linux driver),
+every game launch starts with `HYBRIS_BC_TEXTURES=d3d` and without Steam's Fossilize
+layer (`GameEnvironment.POWERVR`, published to `game-environment.json`), including
+native Linux games run through FEX. These are game-environment defaults, separate
+from the managed profile below, so they also apply under **Standard**. The `d3d`
 policy keeps BC1-BC5 native where the driver samples, filters, blits and copies them, decodes
 the rest of the fourteen Direct3D formats (BC6H and BC7 on the Pixel 10), presents Vulkan 1.4
 devices as 1.3, and reports `textureCompressionBC` only when all fourteen are covered. Proton's
@@ -19,7 +22,9 @@ which the layer hides while it emulates a format.
 hybris compatibility layer. It is opt-in through the launcher's remembered
 graphics choice.
 Use the format-checking DXVK built by `tools/dxvk/build.sh` with this profile.
-The global `textureCompressionBC` feature is reported true only when all fourteen Direct3D BC formats are covered (see the `texture_compression=` field of the `HYBRIS_BC` log line).
+The global `textureCompressionBC` feature is reported true only when all
+fourteen Direct3D BC formats are covered (see the `texture_compression=` field
+of the `HYBRIS_BC` log line).
 
 ## Launcher setup
 
