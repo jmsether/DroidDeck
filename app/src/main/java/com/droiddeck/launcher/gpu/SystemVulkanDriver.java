@@ -17,7 +17,8 @@ import org.json.JSONObject;
 /** Isolated glibc-to-Android Vulkan bridge. It does not replace the rootfs's Mesa libraries. */
 public final class SystemVulkanDriver {
     private static final String ASSET = "hybris/runtime.tzst";
-    private static final String HAL = "/vendor/lib64/hw/vulkan.powervr.so";
+    /** Public for the session report (core.DeviceReport). */
+    public static final String HAL = "/vendor/lib64/hw/vulkan.powervr.so";
     private static final String[] REQUIRED = {
         "lib/libhybris-vulkan-icd.so.0", "lib/libhybris-common.so.1",
         "lib/libhybris/linker/q.so", "lib/libVkLayer_hybris_compat.so"
@@ -25,7 +26,10 @@ public final class SystemVulkanDriver {
 
     private SystemVulkanDriver() {}
 
-    public static boolean isPowerVr() { return new File(HAL).isFile(); }
+    public static boolean isPowerVr() { return isPowerVr(new File("/")); }
+
+    /** [root] is "/" on a device; a test points it at a directory holding a fake /vendor. */
+    public static boolean isPowerVr(File root) { return new File(root, HAL).isFile(); }
 
     public static boolean usesDefault(String choice) {
         return usesDefault(isPowerVr(), choice);

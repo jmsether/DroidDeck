@@ -79,8 +79,15 @@ data class GpuInfo(
         /** [name] when the device names no GPU; English, as the device report shows it. */
         private const val UNNAMED = "this GPU"
 
+        private const val KGSL = "/sys/class/kgsl/kgsl-3d0"
+        private const val ADRENO_HAL = "/vendor/lib64/hw/vulkan.adreno.so"
+
+        /** Qualcomm's stack: the KGSL node, or the vendor's own Vulkan driver at its usual path.
+         *  The app's one Adreno test; [root] is "/" on a device. */
+        fun isAdreno(root: File = File("/")): Boolean = File(root, KGSL).exists() || File(root, ADRENO_HAL).exists()
+
         fun detect(): GpuInfo {
-            val adreno = File("/sys/class/kgsl/kgsl-3d0").exists() || File("/vendor/lib64/hw/vulkan.adreno.so").exists()
+            val adreno = isAdreno()
             val powerVr = SystemVulkanDriver.isPowerVr()
             val raw = listOf("/sys/class/kgsl/kgsl-3d0/gpu_model", "/sys/class/kgsl/kgsl-3d0/gpu_chipid")
                 .firstNotNullOfOrNull { FileUtils.readString(File(it))?.trim()?.takeIf(String::isNotEmpty) }
