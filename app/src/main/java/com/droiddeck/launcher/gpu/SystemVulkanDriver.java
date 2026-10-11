@@ -28,7 +28,7 @@ public final class SystemVulkanDriver {
 
     public static boolean isPowerVr() { return isPowerVr(new File("/")); }
 
-    /** [root] is "/" on a device; a test points it at a directory holding a fake /vendor. */
+    /** {@code root} is "/" on a device; a test points it at a directory holding a fake /vendor. */
     public static boolean isPowerVr(File root) { return new File(root, HAL).isFile(); }
 
     public static boolean usesDefault(String choice) {

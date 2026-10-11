@@ -24,13 +24,20 @@ class DeviceSupportTest {
         assertFalse(DeviceSupport.canDraw(root))
     }
 
-    @Test fun aKgslNodeOrTheAdrenoDriverIsAnAdreno() {
-        File(root, "sys/class/kgsl/kgsl-3d0").mkdirs()
+    private fun assertAdreno() {
         assertTrue(GpuInfo.isAdreno(root))
         assertTrue(DeviceSupport.canDraw(root))
-        File(root, "sys").deleteRecursively()
+        assertFalse(SystemVulkanDriver.isPowerVr(root))
+    }
+
+    @Test fun aKgslNodeIsAnAdreno() {
+        File(root, "sys/class/kgsl/kgsl-3d0").mkdirs()
+        assertAdreno()
+    }
+
+    @Test fun theAdrenoDriverIsAnAdreno() {
         touch("vendor/lib64/hw/vulkan.adreno.so")
-        assertTrue(GpuInfo.isAdreno(root))
+        assertAdreno()
     }
 
     @Test fun powerVrIsNotAnAdrenoButCanDraw() {

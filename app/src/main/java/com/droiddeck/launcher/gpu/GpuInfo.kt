@@ -89,7 +89,7 @@ data class GpuInfo(
         fun detect(): GpuInfo {
             val adreno = isAdreno()
             val powerVr = SystemVulkanDriver.isPowerVr()
-            val raw = listOf("/sys/class/kgsl/kgsl-3d0/gpu_model", "/sys/class/kgsl/kgsl-3d0/gpu_chipid")
+            val raw = listOf("$KGSL/gpu_model", "$KGSL/gpu_chipid")
                 .firstNotNullOfOrNull { FileUtils.readString(File(it))?.trim()?.takeIf(String::isNotEmpty) }
             // Where vendors put the chip's model, named when it is known: "Snapdragon 8 Gen 2 (QCS8550)".
             val soc = if (adreno) SocNames.label() else ""

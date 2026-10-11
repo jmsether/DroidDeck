@@ -1712,7 +1712,7 @@ class MainActivity : ComponentActivity() {
         install(release)
     }
 
-    /** Starts a session; with no runtime on a non-Adreno, the same warning Setup gives comes first, before any download. */
+    /** Starts a session; with no runtime on a device that cannot draw (neither Adreno nor PowerVR), the same warning Setup gives comes first, before any download. */
     private fun startSession(intent: Intent, steamSession: Boolean = false): Boolean {
         if (busy || LinuxRuntimeInstaller.isBusy()) return false
         refreshPhantomStatus()
