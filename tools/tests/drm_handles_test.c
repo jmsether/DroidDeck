@@ -146,6 +146,8 @@ static void empty_table(void) {
 }
 
 int main(void) {
+  /* Descriptor 0 stays taken, so no test descriptor lands there by accident. */
+  if (fcntl(0, F_GETFD) < 0) assert(open("/dev/null", O_RDONLY) == 0);
   int drm = test_open("/dev/null"), dma = test_open("/dev/zero");
   uint32_t handle = 0;
   unsetenv("BL_POWERVR_DRM_HANDLES");
@@ -162,6 +164,12 @@ int main(void) {
   kernel_error = EINVAL;
   assert(drmPrimeFDToHandle(drm, -1, &handle) != 0 && errno == EBADF);
   empty_table();
+
+  /* Handle 0 is never a token: an empty slot must not answer for descriptor 0 and close it. */
+  struct gem_close zero = {0};
+  int zero_rc = 123;
+  assert(bl_drm_gem_close(0, GEM_CLOSE, &zero, &zero_rc) == 0 && zero_rc == 123);
+  assert(drmCloseBufferHandle(0, 0) != 0 && fcntl(0, F_GETFD) >= 0);
 
   /* A 6.6 kernel in the app sandbox (Pixel 10: no F_DUPFD_QUERY, kcmp refused) cannot compare
    * open files. Handles then match by descriptor number, as KGSL's do there, and the session log

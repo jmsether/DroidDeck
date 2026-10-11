@@ -132,6 +132,7 @@ static int owned_description(int owned, int fd) {
  * caller presenting that old token reaches it.
  */
 static int find_handle_locked(int fd, uint32_t handle) {
+  if (!handle) return -1; /* 0 marks an empty slot, whose zeroed descriptors would answer for fd 0 */
   for (int i = 0; i < MAX_HANDLES; i++) {
     struct handle_entry *entry = &handle_entries[i];
     if (entry->handle != handle) continue;
