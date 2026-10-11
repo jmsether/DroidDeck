@@ -8,20 +8,8 @@ out=$(cd "$out" && pwd)
 . "$root/tools/hybris/source.env"
 work=$(mktemp -d "${TMPDIR:-/tmp}/droiddeck-hybris.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-fetch() {
-  git init -q "$3"
-  git -C "$3" fetch --depth=1 "$1" "$2"
-  git -C "$3" checkout -q --detach FETCH_HEAD
-  test "$(git -C "$3" rev-parse HEAD)" = "$2"
-}
-fetch https://github.com/taowen/libhybris.git "$HYBRIS_REVISION" "$work/libhybris"
-fetch https://github.com/taowen/arlinux-rootfs.git "$PROTOCOL_REVISION" "$work/rootfs"
-git -C "$work/libhybris" apply --check "$root/tools/hybris/powervr-hal-version.patch"
-git -C "$work/libhybris" apply "$root/tools/hybris/powervr-hal-version.patch"
-for patch in "$root"/tools/hybris/patches/*.patch; do
-  git -C "$work/libhybris" apply --check "$patch"
-  git -C "$work/libhybris" apply "$patch"
-done
+"$root/tools/hybris/prepare_source.sh" libhybris "$work/libhybris"
+"$root/tools/hybris/prepare_source.sh" rootfs "$work/rootfs"
 export ARLINUX_WSI_PROTOCOL_DIR="$work/rootfs/graphics-protocols"
 export CONTAINER_ENGINE=podman
 "$work/libhybris/tools/build-aarch64.sh" --out "$work/build"

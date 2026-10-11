@@ -456,7 +456,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/hybris-runtime
-          key: hybris-runtime-v1-${{ hashFiles('tools/hybris/source.env', 'tools/hybris/build_runtime.sh', 'tools/hybris/powervr-hal-version.patch', 'tools/hybris/patches/*.patch') }}
+          key: hybris-runtime-v1-${{ hashFiles('tools/hybris/source.env', 'tools/hybris/build_runtime.sh', 'tools/hybris/prepare_source.sh', 'tools/hybris/powervr-hal-version.patch', 'tools/hybris/patches/*.patch') }}
 
       - name: Build the PowerVR Linux driver wrapper
         if: steps.hybris.outputs.cache-hit != 'true'
