@@ -49,12 +49,18 @@ object GameEnvironment {
      * reports textureCompressionBC, so Proton's own DXVK accepts the GPU. Steam's Fossilize layer
      * made DXVK lose its surface. Game launches apply these (droiddeck-game-env, and droiddeck-fex
      * for native Linux games), never gamescope or the Steam client, which the policy's 1.3 cap
-     * would otherwise reach.
+     * would otherwise reach. Games draw on gamescope's Xwayland, which lacks the TAWC-DRI extension
+     * the ICD's X11 surfaces need; the runtime's window-system-integration layer, found through the
+     * session's VK_LAYER_PATH, supplies surface and swapchain above the compat layer. Only game
+     * launches name it, so the Steam client and gamescope never load it.
      */
     val POWERVR: Map<String, String?> = linkedMapOf(
         "HYBRIS_BC_TEXTURES" to "d3d",
         "DISABLE_VK_LAYER_VALVE_steam_fossilize_1" to "1",
         "ENABLE_VK_LAYER_VALVE_steam_fossilize_1" to null,
+        "VK_INSTANCE_LAYERS" to "VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat",
+        "ENABLE_GAMESCOPE_WSI" to "0",
+        "VK_LOADER_LAYERS_DISABLE" to "*gamescope*",
     )
 
     const val FORCE_SSBS = "DROIDDECK_FORCE_SSBS"

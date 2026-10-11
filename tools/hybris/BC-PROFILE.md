@@ -10,7 +10,9 @@ from the managed profile below, so they also apply under **Standard**. The `d3d`
 policy keeps BC1-BC5 native where the driver samples, filters, blits and copies them, decodes
 the rest of the fourteen Direct3D formats (BC6H and BC7 on the Pixel 10), presents Vulkan 1.4
 devices as 1.3, and reports `textureCompressionBC` only when all fourteen are covered. Proton's
-own DXVK then accepts the GPU, so the **Standard** graphics choice runs Direct3D 9-11 games.
+own DXVK then accepts the GPU. **Standard** presents games through the runtime's X11 WSI layer
+(see [README.md](README.md)); device verification of stock DXVK Direct3D 9 and 11, OpenGL (Zink)
+and 32-bit games is still pending.
 Gamescope and the Steam client never see the policy. The **Experimental** choice below still
 overrides it with `dxvk` and the format-checking DXVK.
 

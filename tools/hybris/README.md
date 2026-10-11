@@ -92,9 +92,10 @@ End-to-end window and Steam testing remains required before calling this tested
 support. No AVF transport is used by this candidate.
 
 `build_runtime.sh` builds the pinned upstream wrapper and our HAL-version patch
-on CI. The fetch-and-patch step lives in `tools/hybris/prepare_source.sh`, shared with the
+on CI, and packs the X11 WSI layer that CI built from `tools/vulkan-wsi` (its second
+argument). The fetch-and-patch step lives in `tools/hybris/prepare_source.sh`, shared with the
 host tests in `tools/tests/test_hybris_compat.py`. The APK carries an isolated runtime
-archive, licenses, source and patch.
+archive with the licenses, source and patch of the wrapper and of the WSI layer.
 `check_runtime.py` verifies the archive, AArch64 libraries and provenance before
 upload. Explicit imported driver choices are preserved; Auto selects this wrapper
 only on PowerVR devices.
@@ -124,6 +125,19 @@ Kopper path, and selects ANGLE's OpenGL backend. Zink still renders through the
 system Vulkan driver; this avoids creating Vulkan window surfaces against an inner
 server that provides neither `android_wlegl` nor `TAWC-DRI`. Other driver selections
 retain the existing Steam presentation settings. Device rendering remains unverified.
+
+Games are different: they draw on Gamescope's Xwayland, which also lacks `TAWC-DRI`, so the
+ICD cannot create X11 surfaces there. The runtime therefore carries the pinned X11 WSI layer
+(`tools/vulkan-wsi`, built by its own CI job and packed byte-identical as
+`lib/libVkLayer_window_system_integration.so` beside its manifest). Under **Standard**,
+`GameEnvironment.POWERVR` names it above the compat layer for game launches only
+(`VK_INSTANCE_LAYERS=VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat`, found through the
+session's `VK_LAYER_PATH`) and turns Gamescope's own WSI layer off (`ENABLE_GAMESCOPE_WSI=0`,
+`VK_LOADER_LAYERS_DISABLE=*gamescope*`). The Steam client and Gamescope name only the compat
+layer and never load it. `check_runtime.py` fails the build if either layer manifest, or the
+library it names, is missing from the runtime. On a Pixel 10 Pro the same chain, placed by hand,
+took Darksiders to gameplay under Standard; this default has not been run on a device yet, and
+device verification of stock DXVK Direct3D 9/11, OpenGL (Zink) and 32-bit games is still pending.
 
 ## Local evidence
 

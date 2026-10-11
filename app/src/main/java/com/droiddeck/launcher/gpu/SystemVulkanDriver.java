@@ -21,7 +21,9 @@ public final class SystemVulkanDriver {
     public static final String HAL = "/vendor/lib64/hw/vulkan.powervr.so";
     private static final String[] REQUIRED = {
         "lib/libhybris-vulkan-icd.so.0", "lib/libhybris-common.so.1",
-        "lib/libhybris/linker/q.so", "lib/libVkLayer_hybris_compat.so"
+        "lib/libhybris/linker/q.so", "lib/libVkLayer_hybris_compat.so",
+        "lib/VkLayer_hybris_compat.json",
+        "lib/libVkLayer_window_system_integration.so", "lib/VkLayer_window_system_integration.json"
     };
 
     private SystemVulkanDriver() {}

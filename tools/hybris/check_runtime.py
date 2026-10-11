@@ -12,6 +12,20 @@ from zipfile import ZipFile
 REQUIRED = (
     "lib/libhybris-vulkan-icd.so.0", "lib/libhybris-common.so.1",
     "lib/libhybris/linker/q.so", "lib/libVkLayer_hybris_compat.so",
+    "lib/libVkLayer_window_system_integration.so",
+)
+# Vulkan layer manifests the runtime must carry and the layer name each declares. A game's
+# VK_INSTANCE_LAYERS names these; the loader skips a name it cannot find without a word, so a layer
+# missing here would be a black screen in every game. library_path must be directory-qualified
+# ("./libX.so") and resolve inside the archive.
+LAYERS = {
+    "lib/VkLayer_hybris_compat.json": "VK_LAYER_HYBRIS_compat",
+    "lib/VkLayer_window_system_integration.json": "VK_LAYER_window_system_integration",
+}
+PROVENANCE = (
+    "licenses/libhybris-source.tar.zst", "licenses/powervr.patch", "source-commit",
+    "licenses/vulkan-wsi-layer.LICENSE", "licenses/vulkan-wsi-layer.patch",
+    "licenses/vulkan-wsi-layer-source.tar.zst", "licenses/vulkan-wsi-layer.source-commit",
 )
 
 
@@ -49,11 +63,24 @@ def check(archive, version):
             data = read(name)
             if data[:6] != b"\x7fELF\x02\x01" or data[18:20] != b"\xb7\x00":
                 raise ValueError("runtime library is not ELF64 AArch64: " + name)
+        for name, layer_name in LAYERS.items():
+            manifest = json.loads(read(name))
+            layer = manifest.get("layer") if isinstance(manifest, dict) else None
+            layer = layer if isinstance(layer, dict) else {}
+            if layer.get("name") != layer_name:
+                raise ValueError("runtime layer manifest has the wrong layer name: %s (found %r)"
+                                 % (name, layer.get("name")))
+            # The loader resolves a path with a directory against the manifest but dlopens a bare name
+            # through the library search path, which does not include lib/.
+            library = layer.get("library_path")
+            if not isinstance(library, str) or "/" not in library:
+                raise ValueError("runtime layer manifest has no directory-qualified library_path: " + name)
+            read(str(PurePosixPath(name).parent / library))
         for line in read("SHA256SUMS").decode("ascii").splitlines():
             digest, name = line.split("  ", 1)
             if not name.startswith("lib/") or hashlib.sha256(read(name)).hexdigest() != digest:
                 raise ValueError("runtime library checksum mismatch: " + name)
-        for name in ("licenses/libhybris-source.tar.zst", "licenses/powervr.patch", "source-commit"):
+        for name in PROVENANCE:
             if not read(name):
                 raise ValueError("missing runtime provenance: " + name)
 

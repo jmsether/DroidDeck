@@ -1,7 +1,9 @@
 import hashlib
 import importlib.util
 import io
-from pathlib import Path
+import json
+from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import tarfile
 import unittest
@@ -24,16 +26,21 @@ class HybrisRuntimeTest(unittest.TestCase):
             runtime.check_graphics_profile((profile / "graphics-profile.json").read_bytes(),
                                            (profile / "run-proton.py").read_bytes() + b"\n# changed\n")
 
-    def fixture(self, missing=None, machine=b"\xb7\x00", stale=False, unsafe=False):
+    def fixture(self, missing=None, machine=b"\xb7\x00", stale=False, unsafe=False, layers=None):
+        """An archive as build_runtime.sh packs it; `layers` overrides fields of a layer manifest."""
         elf = bytearray(64)
         elf[:6] = b"\x7fELF\x02\x01"
         elf[18:20] = machine
         files = {name: bytes(elf) for name in runtime.REQUIRED if name != missing}
+        for name, layer_name in runtime.LAYERS.items():
+            layer = {"name": layer_name, "library_path": "./lib%s.so" % PurePosixPath(name).stem,
+                     **(layers or {}).get(name, {})}
+            if name != missing:
+                files[name] = json.dumps({"file_format_version": "1.2.0", "layer": layer}).encode()
         files["SHA256SUMS"] = "".join(
             hashlib.sha256(data).hexdigest() + "  " + name + "\n"
             for name, data in files.items()).encode()
-        files.update({"licenses/libhybris-source.tar.zst": b"source",
-                      "licenses/powervr.patch": b"patch", "source-commit": b"pinned revision"})
+        files.update({name: b"provenance" for name in runtime.PROVENANCE if name != missing})
         if stale:
             files[runtime.REQUIRED[0]] += b"changed after hashing"
         raw = io.BytesIO()
@@ -58,6 +65,48 @@ class HybrisRuntimeTest(unittest.TestCase):
     def test_missing_wrapper_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing runtime file"):
             runtime.check(*self.fixture(missing=runtime.REQUIRED[0]))
+
+    def test_missing_x11_wsi_layer_is_rejected(self):
+        for name in ("lib/libVkLayer_window_system_integration.so", "lib/VkLayer_window_system_integration.json"):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, "missing runtime file: " + name):
+                runtime.check(*self.fixture(missing=name))
+
+    def test_layer_manifest_must_name_its_layer(self):
+        manifest = "lib/VkLayer_window_system_integration.json"
+        with self.assertRaisesRegex(ValueError, "wrong layer name: " + manifest + r" \(found 'VK_LAYER_other'\)"):
+            runtime.check(*self.fixture(layers={manifest: {"name": "VK_LAYER_other"}}))
+
+    def test_layer_manifest_library_must_be_in_the_archive(self):
+        # A bare name passes the archive lookup (it resolves beside the manifest) but the loader would
+        # dlopen it through the library search path, where lib/ is deliberately not.
+        manifest = "lib/VkLayer_window_system_integration.json"
+        for library, error in (("./libMissing.so", "missing runtime file: lib/libMissing.so"),
+                               ("/usr/lib/libVkLayer_window_system_integration.so", "missing runtime file: /usr/lib/"),
+                               (None, "directory-qualified library_path"),
+                               ("libVkLayer_window_system_integration.so", "directory-qualified library_path")):
+            with self.subTest(library), self.assertRaisesRegex(ValueError, error):
+                runtime.check(*self.fixture(layers={manifest: {"library_path": library}}))
+
+    def test_wsi_layer_provenance_is_required(self):
+        self.assertLessEqual({"licenses/vulkan-wsi-layer.LICENSE", "licenses/vulkan-wsi-layer.patch",
+                              "licenses/vulkan-wsi-layer-source.tar.zst",
+                              "licenses/vulkan-wsi-layer.source-commit"}, set(runtime.PROVENANCE))
+
+    def test_missing_provenance_is_rejected(self):
+        for name in runtime.PROVENANCE:
+            with self.subTest(name), self.assertRaisesRegex(ValueError, "missing runtime file: " + name):
+                runtime.check(*self.fixture(missing=name))
+
+    def test_game_defaults_name_only_layers_the_runtime_ships(self):
+        # The loader skips an unknown name in VK_INSTANCE_LAYERS without a word: every game would
+        # lose its surface (or the compat layer) and nothing would say why.
+        source = (Path(__file__).resolve().parents[2]
+                  / "app/src/main/java/com/droiddeck/launcher/core/GameEnvironment.kt").read_text(encoding="utf-8")
+        powervr = re.search(r"val POWERVR\b.*?linkedMapOf\((.*?)\n    \)", source, re.S)
+        layers = re.search(r'"VK_INSTANCE_LAYERS"\s+to\s+"([^"]+)"', powervr.group(1) if powervr else "")
+        self.assertIsNotNone(layers, "GameEnvironment.POWERVR sets no VK_INSTANCE_LAYERS")
+        self.assertLessEqual(set(layers.group(1).split(":")), set(runtime.LAYERS.values()))
+        self.assertIn("VK_LAYER_window_system_integration", layers.group(1).split(":"))
 
     def test_host_architecture_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "not ELF64 AArch64"):

@@ -84,12 +84,14 @@ class GameEnvironmentStoreTest {
         assertEquals("1", shared.getString("FEX_X87REDUCEDPRECISION"))
         assertEquals("1", shared.getString("FEX_MULTIBLOCK"))
         assertFalse(shared.has("HYBRIS_BC_TEXTURES"))
+        assertFalse(shared.has("VK_INSTANCE_LAYERS"))
     }
 
     @Test fun powerVrDefaultsReachThePublishedFileButNotTheUsersOwnConfig() {
         GameEnvironmentStore.publish(context, GameEnvironment.Config(), powerVr = true)
         val shared = JSONObject(guest.readText()).getJSONObject("shared")
         assertEquals("d3d", shared.getString("HYBRIS_BC_TEXTURES"))
+        assertEquals("VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat", shared.getString("VK_INSTANCE_LAYERS"))
         assertEquals("1", shared.getString("DISABLE_VK_LAYER_VALVE_steam_fossilize_1"))
         assertTrue(shared.has("ENABLE_VK_LAYER_VALVE_steam_fossilize_1"))
         assertTrue(shared.isNull("ENABLE_VK_LAYER_VALVE_steam_fossilize_1"))

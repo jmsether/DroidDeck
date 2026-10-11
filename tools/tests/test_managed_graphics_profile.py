@@ -183,15 +183,23 @@ class ManagedGraphicsProfileTest(unittest.TestCase):
             "HYBRIS_BC_TEXTURES": "d3d",
             "DISABLE_VK_LAYER_VALVE_steam_fossilize_1": "1",
             "ENABLE_VK_LAYER_VALVE_steam_fossilize_1": None,
+            "VK_INSTANCE_LAYERS": "VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat",
+            "ENABLE_GAMESCOPE_WSI": "0",
+            "VK_LOADER_LAYERS_DISABLE": "*gamescope*",
         }
         env = self.launch(PROTON_USE_WINED3D="1")
         self.assertEqual(env["PROTON_USE_WINED3D"], "1")
-        for name in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "DROIDDECK_PROTON_WRAPPER"):
+        for name in ("VK_LAYER_PATH", "DROIDDECK_PROTON_WRAPPER"):  # the profile's own keys
             self.assertNotIn(name, env)
-        # Inert there: WineD3D renders with GL on llvmpipe in the desktop session.
+        # They take effect there: WineD3D's GL is Zink on the same Vulkan driver (every session sets
+        # GALLIUM_DRIVER=zink, SessionService).
         self.assertEqual(env["HYBRIS_BC_TEXTURES"], "d3d")
         self.assertEqual(env["DISABLE_VK_LAYER_VALVE_steam_fossilize_1"], "1")
         self.assertNotIn("ENABLE_VK_LAYER_VALVE_steam_fossilize_1", env)
+        # The shared layer chain reaches windowed runs too; that they still present is unverified on a device.
+        self.assertEqual(env["VK_INSTANCE_LAYERS"], "VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat")
+        self.assertEqual(env["ENABLE_GAMESCOPE_WSI"], "0")
+        self.assertEqual(env["VK_LOADER_LAYERS_DISABLE"], "*gamescope*")
 
     def test_published_alias_paths_stay_lexical_while_files_are_confined_canonically(self):
         alias = Path(self.tmp.name) / "app-data-alias"

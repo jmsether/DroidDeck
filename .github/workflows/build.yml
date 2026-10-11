@@ -34,8 +34,45 @@ env:
   BUILD_ASSETS_REPOSITORY: ${{ vars.BUILD_ASSETS_REPOSITORY || 'Droid-Deck/DroidDeck' }}
 
 jobs:
+  # The X11 surface/swapchain layer games present through under the Standard graphics profile
+  # (tools/vulkan-wsi). It is a native build, so it needs an ARM64 host; the build job packs it,
+  # byte-identical, into the PowerVR runtime (tools/hybris/build_runtime.sh).
+  wsi-layer:
+    name: Build the X11 WSI layer
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Cache the X11 WSI layer
+        id: wsi
+        uses: actions/cache@v6
+        with:
+          path: out/wsi
+          key: vulkan-wsi-v1-${{ hashFiles('tools/vulkan-wsi/**') }}
+
+      - name: Build the pinned X11 WSI layer
+        if: steps.wsi.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build g++ pkg-config zstd libvulkan-dev libdrm-dev libxcb1-dev libxcb-shm0-dev libxcb-sync-dev libxcb-dri3-dev libxcb-present-dev libxcb-randr0-dev libx11-dev libx11-xcb-dev libxrandr-dev >/dev/null
+          bash tools/vulkan-wsi/build.sh out/wsi
+
+      - name: Verify the X11 WSI layer
+        run: (cd out/wsi && sha256sum -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-wsi-layer
+          path: out/wsi
+
   build:
     name: Build APK
+    needs: wsi-layer
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -458,7 +495,14 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/hybris-runtime
-          key: hybris-runtime-v1-${{ hashFiles('tools/hybris/source.env', 'tools/hybris/build_runtime.sh', 'tools/hybris/prepare_source.sh', 'tools/hybris/powervr-hal-version.patch', 'tools/hybris/patches/*.patch') }}
+          key: hybris-runtime-v2-${{ hashFiles('tools/hybris/source.env', 'tools/hybris/build_runtime.sh', 'tools/hybris/prepare_source.sh', 'tools/hybris/powervr-hal-version.patch', 'tools/hybris/patches/*.patch', 'tools/vulkan-wsi/**') }}
+
+      - name: Fetch the X11 WSI layer the wrapper ships with
+        if: steps.hybris.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: vulkan-wsi-layer
+          path: ${{ runner.temp }}/vulkan-wsi
 
       - name: Build the PowerVR Linux driver wrapper
         if: steps.hybris.outputs.cache-hit != 'true'
@@ -466,7 +510,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq podman patchelf zstd >/dev/null
-          bash tools/hybris/build_runtime.sh "$RUNNER_TEMP/hybris-runtime"
+          bash tools/hybris/build_runtime.sh "$RUNNER_TEMP/hybris-runtime" "$RUNNER_TEMP/vulkan-wsi"
 
       - name: Bundle the PowerVR Linux driver wrapper
         run: |

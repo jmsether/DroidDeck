@@ -29,6 +29,24 @@ class GameEnvironmentTest {
         assertNull(pvr["ENABLE_VK_LAYER_VALVE_steam_fossilize_1"])
     }
 
+    @Test fun powerVrGamesPresentThroughTheRuntimesX11WsiLayerAboveTheCompatLayer() {
+        val plain = GameEnvironment.defaults("")
+        listOf("VK_INSTANCE_LAYERS", "ENABLE_GAMESCOPE_WSI", "VK_LOADER_LAYERS_DISABLE").forEach { assertFalse(it, plain.containsKey(it)) }
+        val pvr = GameEnvironment.defaults("", powerVr = true)
+        assertEquals("VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat", pvr["VK_INSTANCE_LAYERS"])
+        assertEquals("0", pvr["ENABLE_GAMESCOPE_WSI"])
+        assertEquals("*gamescope*", pvr["VK_LOADER_LAYERS_DISABLE"])
+        // The session already exports VK_LAYER_PATH (SystemVulkanDriver); a default here would shadow it.
+        assertFalse(pvr.containsKey("VK_LAYER_PATH"))
+        assertFalse(pvr.containsKey("DISABLE_WSI_LAYER"))
+    }
+
+    @Test fun aGameCanStillOverrideTheLayerChain() {
+        val config = GameEnvironment.Config().withEntries("42", mapOf("VK_INSTANCE_LAYERS" to "VK_LAYER_HYBRIS_compat"))
+        assertEquals("VK_LAYER_HYBRIS_compat", GameEnvironment.effective(config, "", "42", powerVr = true)["VK_INSTANCE_LAYERS"])
+        assertEquals("VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat", GameEnvironment.effective(config, "", "43", powerVr = true)["VK_INSTANCE_LAYERS"])
+    }
+
     @Test fun theSharedScopeOrAGameOverridesThePowerVrDefaults() {
         val config = GameEnvironment.Config(shared = mapOf("HYBRIS_BC_TEXTURES" to "dxvk"))
             .withEntries("42", mapOf("HYBRIS_BC_TEXTURES" to "0"))
