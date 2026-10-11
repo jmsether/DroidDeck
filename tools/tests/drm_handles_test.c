@@ -21,7 +21,7 @@
 #define TEST_FD_LIMIT 65536
 static _Atomic unsigned identities[TEST_FD_LIMIT];
 static unsigned identity_serial = 1;
-static int identity_denied, kgsl_present;
+static int identity_denied, kcmp_works, kgsl_present;
 static int kernel_error = EINVAL;
 static int native_imports, native_exports, native_closes;
 static const char *driver_name = "pvr";
@@ -95,10 +95,14 @@ static long fixture_syscall(long number, ...) {
     va_end(ap);
     return 0;
   }
-  va_end(ap);
   assert(number == SYS_kcmp);
-  errno = EPERM;
-  return -1;
+  if (!kcmp_works) { va_end(ap); errno = EPERM; return -1; }
+  (void)va_arg(ap, int); (void)va_arg(ap, int); (void)va_arg(ap, int);
+  int a = va_arg(ap, int), b = va_arg(ap, int);
+  va_end(ap);
+  if (a < 0 || b < 0 || a >= TEST_FD_LIMIT || b >= TEST_FD_LIMIT ||
+      !identities[a] || !identities[b]) { errno = EBADF; return -1; }
+  return identities[a] == identities[b] ? 0 : identities[a] < identities[b] ? 1 : 2;
 }
 
 static int native_import(int fd, int dma, uint32_t *handle) {
@@ -159,15 +163,64 @@ int main(void) {
   assert(drmPrimeFDToHandle(drm, -1, &handle) != 0 && errno == EBADF);
   empty_table();
 
-  int baseline = count_fds();
+  /* A 6.6 kernel in the app sandbox (Pixel 10: no F_DUPFD_QUERY, kcmp refused) cannot compare
+   * open files. Handles then match by descriptor number, as KGSL's do there, and the session log
+   * says so once per process - and says nothing while the kernel can answer. */
+  int baseline = count_fds(), out = -1;
+  uint32_t tokens[3] = {0};
+  int unproven = fixture_fcntl(drm, F_DUPFD_CLOEXEC, 0);
+  fflush(stderr);
+  FILE *log = tmpfile();
+  int saved_stderr = dup(2);
+  assert(log && saved_stderr >= 0 && dup2(fileno(log), 2) == 2);
+  int failed = drmPrimeFDToHandle(drm, dma, &tokens[2]);
+  off_t quiet = lseek(2, 0, SEEK_CUR);
   identity_denied = 1;
-  assert(drmPrimeFDToHandle(drm, dma, &handle) == -EOPNOTSUPP);
+  failed = failed || drmPrimeFDToHandle(drm, dma, &tokens[0]) || drmPrimeFDToHandle(drm, dma, &tokens[1]);
+  fflush(stderr);
+  assert(dup2(saved_stderr, 2) == 2 && close(saved_stderr) == 0);
+  assert(!failed && quiet == 0);
+  char said[512] = {0};
+  rewind(log);
+  assert(fread(said, 1, sizeof(said) - 1, log) > 0 && fclose(log) == 0);
+  const char *once = strstr(said, "droiddeck-drm:");
+  assert(once && !strstr(once + 1, "droiddeck-drm:"));
+  assert(count_fds() == baseline + 7);
+  for (int n = 0; n < 3; ++n) {
+    assert(tokens[n] & PVR_HANDLE_BIT);
+    assert(drmPrimeHandleToFD(unproven, tokens[n], O_CLOEXEC, &out) != 0);
+    assert(drmPrimeHandleToFD(drm, tokens[n], O_CLOEXEC, &out) == 0);
+    fixture_close(out);
+    assert(drmCloseBufferHandle(drm, tokens[n]) == 0);
+    assert(drmPrimeHandleToFD(drm, tokens[n], O_CLOEXEC, &out) != 0);
+  }
+  fixture_close(unproven);
   assert(count_fds() == baseline);
-  identity_denied = 0;
+  empty_table();
+
+  /* The same kernel outside the sandbox (adb shell) answers through kcmp: an alias is proven, and
+   * neither a closed nor a reused number is. */
+  kcmp_works = 1;
+  assert(drmPrimeFDToHandle(drm, dma, &handle) == 0);
+  int proven = fixture_fcntl(drm, F_DUPFD_CLOEXEC, 0), other = test_open("/dev/null");
+  assert(drmPrimeHandleToFD(other, handle, O_CLOEXEC, &out) != 0);
+  int number = drm;
+  fixture_close(drm);
+  assert(drmPrimeHandleToFD(number, handle, O_CLOEXEC, &out) != 0);
+  drm = test_open("/dev/null");
+  assert(drm == number && drmPrimeHandleToFD(drm, handle, O_CLOEXEC, &out) != 0);
+  assert(drmPrimeHandleToFD(proven, handle, O_CLOEXEC, &out) == 0);
+  fixture_close(out);
+  assert(drmCloseBufferHandle(proven, handle) == 0);
+  fixture_close(proven);
+  fixture_close(other);
+  identity_denied = kcmp_works = 0;
+  assert(count_fds() == baseline);
+  empty_table();
 
   assert(drmPrimeFDToHandle(drm, dma, &handle) == 0 && (handle & PVR_HANDLE_BIT));
   assert(count_fds() == baseline + 2);
-  int alias = fixture_fcntl(drm, F_DUPFD_CLOEXEC, 0), out = -1;
+  int alias = fixture_fcntl(drm, F_DUPFD_CLOEXEC, 0);
   int separate = test_open("/dev/null");
   assert(drmPrimeHandleToFD(separate, handle, O_CLOEXEC | O_RDWR, &out) != 0);
   struct gem_close close_request = {.handle = handle};
@@ -187,6 +240,7 @@ int main(void) {
   /* A closed-and-reused descriptor must not inherit the old open file's handles. */
   int old_number = drm;
   fixture_close(drm);
+  assert(drmPrimeHandleToFD(old_number, handle, O_CLOEXEC, &out) != 0); /* closed is not unknown */
   drm = test_open("/dev/null");
   assert(drm == old_number);
   assert(drmPrimeHandleToFD(drm, handle, O_CLOEXEC, &out) != 0);
@@ -245,6 +299,14 @@ int main(void) {
   assert(drmPrimeFDToHandle(dma, drm, &handle) == 0 && !(handle & PVR_HANDLE_BIT));
   assert(drmPrimeHandleToFD(dma, handle, O_CLOEXEC | O_RDWR, &out) == 0);
   fixture_close(out);
+  /* Another KGSL number reaches the handle only when kcmp proves it is the same open file. */
+  int kgsl_alias = fixture_fcntl(dma, F_DUPFD_CLOEXEC, 0);
+  assert(drmPrimeHandleToFD(kgsl_alias, handle, O_CLOEXEC, &out) != 0);
+  kcmp_works = 1;
+  assert(drmPrimeHandleToFD(kgsl_alias, handle, O_CLOEXEC, &out) == 0);
+  fixture_close(out);
+  kcmp_works = 0;
+  fixture_close(kgsl_alias);
   close_request.handle = handle;
   assert(bl_drm_gem_close(dma, GEM_CLOSE, &close_request, &rc) == 1 && rc == 0);
   assert(drmCloseBufferHandle(dma, handle) == -EINVAL);

@@ -104,12 +104,17 @@ preload. The Android `pvr` render node rejects PRIME-to-GEM conversion even for
 DMA-BUFs that its Vulkan driver exports and imports successfully. The adapter
 tries the real operation first, then provides an owned descriptor-backed handle
 only for that node's `EINVAL` result. Real kernel handles continue to libdrm.
-An owned render descriptor and open-file-description checks prevent a reused
-descriptor number from inheriting an old handle. Other drivers and manually
-selected ICDs do not enable this path.
+An owned render descriptor and open-file-description checks (`F_DUPFD_QUERY` on
+Linux 6.10+, else `kcmp`) prevent a reused descriptor number from inheriting an
+old handle. A 6.6 kernel inside the app sandbox (Pixel 10) has neither, so there
+handles match by descriptor number, as KGSL's do when `kcmp` is refused: a
+closed or reused number still reaches its old handles, and a duplicate of the
+descriptor does not. The session log says so once per process. Other drivers and
+manually selected ICDs do not enable this path.
 
 `python3 -m unittest tools.tests.test_drm_handles` checks scoping, descriptor
-reuse, fork behavior, handle cleanup and native-handle passthrough. Native device
+reuse, the descriptor-number fallback, fork behavior, handle cleanup and
+native-handle passthrough. Native device
 probes also verified DMA-BUF identity and Vulkan memory import/image binding;
 these checks do not establish correct pixel rendering or end-to-end Steam support.
 

@@ -11,7 +11,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -92,38 +94,61 @@ static void *real(const char *name) {
   return fn;
 }
 
-static int same_file_description(int a, int b) {
-  if (a == b) {
-    return 1;
-  }
+/* 1 when a and b share an open file description, 0 when they do not (or one is closed), -1 when
+ * kcmp gives no answer (Android's app seccomp filter refuses it). */
+static int kcmp_files(int a, int b) {
 #ifdef SYS_kcmp
   int saved_errno = errno;
-  long ret = syscall(SYS_kcmp, getpid(), getpid(), 0 /* KCMP_FILE */, a, b);
+  long order = syscall(SYS_kcmp, getpid(), getpid(), 0 /* KCMP_FILE */, a, b);
+  int error = errno;
   errno = saved_errno;
-  return ret == 0;
+  return order >= 0 ? order == 0 : error == EBADF ? 0 : -1;
 #else
-  return 0;
+  (void) a;
+  (void) b;
+  return -1;
 #endif
 }
 
-static int same_owned_description(int owned, int fd) {
-  int saved_errno = errno;
-  int result = fcntl(owned, F_DUPFD_QUERY, fd);
-  errno = saved_errno;
-  if (result >= 0) return result == 1;
-  return same_file_description(owned, fd);
+static int same_file_description(int a, int b) {
+  return a == b || kcmp_files(a, b) == 1;
 }
 
+/* kcmp_files' answers for a PowerVR entry's owned descriptor. F_DUPFD_QUERY needs Linux 6.10, so a
+ * 6.6 kernel (Pixel 10) inside the app sandbox answers -1 whenever `owned` is open. */
+static int owned_description(int owned, int fd) {
+  int saved_errno = errno;
+  int result = fcntl(owned, F_DUPFD_QUERY, fd);
+  int error = errno;
+  errno = saved_errno;
+  if (result >= 0) return result == 1;
+  return error == EBADF ? 0 : kcmp_files(owned, fd);
+}
+
+/*
+ * Where the kernel cannot compare open files, a PowerVR entry matches by descriptor number, which is
+ * what KGSL matching comes to when kcmp is refused. A closed or reused number then still reaches the
+ * old entry and an alias of the same open file does not; tokens are never reissued, so only a
+ * caller presenting that old token reaches it.
+ */
 static int find_handle_locked(int fd, uint32_t handle) {
   for (int i = 0; i < MAX_HANDLES; i++) {
-    if (handle_entries[i].handle == handle &&
-        (handle_entries[i].powervr
-          ? same_owned_description(handle_entries[i].owned_drm_fd, fd)
-          : same_file_description(handle_entries[i].drm_fd, fd))) {
-      return i;
-    }
+    struct handle_entry *entry = &handle_entries[i];
+    if (entry->handle != handle) continue;
+    int same = entry->powervr ? owned_description(entry->owned_drm_fd, fd)
+                              : same_file_description(entry->drm_fd, fd);
+    if (same < 0 ? entry->drm_fd == fd : same) return i;
   }
   return -1;
+}
+
+/* Once per process, so the session log shows which matching a PowerVR session got. */
+static void report_number_matching(void) {
+  static atomic_flag reported = ATOMIC_FLAG_INIT;
+  if (!atomic_flag_test_and_set(&reported)) {
+    fprintf(stderr, "droiddeck-drm: this kernel cannot compare open files (no F_DUPFD_QUERY, kcmp "
+                    "refused); PowerVR handles match by descriptor number\n");
+  }
 }
 
 /*
@@ -172,11 +197,13 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle) {
   if (powervr) {
     owner = fcntl(fd, F_DUPFD_CLOEXEC, 0);
     if (owner < 0) return -errno;
-    if (!same_owned_description(owner, fd)) {
+    int same = owned_description(owner, fd);
+    if (same == 0) {
       close(owner);
       errno = EOPNOTSUPP;
       return -EOPNOTSUPP;
     }
+    if (same < 0) report_number_matching();
   }
   int dup_fd = fcntl(prime_fd, F_DUPFD_CLOEXEC, 0);
   if (dup_fd < 0) {
