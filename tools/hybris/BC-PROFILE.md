@@ -1,10 +1,25 @@
 # Experimental Direct3D BC profile
 
+## Default on PowerVR: `HYBRIS_BC_TEXTURES=d3d`
+
+When the phone's own PowerVR driver is the game driver (no imported Linux driver), every game launch starts with `HYBRIS_BC_TEXTURES=d3d` and without Steam's
+Fossilize layer (`GameEnvironment.POWERVR`, published to `game-environment.json`), including native Linux games run through FEX. The `d3d`
+policy keeps BC1-BC5 native where the driver samples, filters, blits and copies them, decodes
+the rest of the fourteen Direct3D formats (BC6H and BC7 on the Pixel 10), presents Vulkan 1.4
+devices as 1.3, and reports `textureCompressionBC` only when all fourteen are covered. Proton's
+own DXVK then accepts the GPU, so the **Standard** graphics choice runs Direct3D 9-11 games.
+Gamescope and the Steam client never see the policy. The **Experimental** choice below still
+overrides it with `dxvk` and the format-checking DXVK.
+
+The layer prints, once per process, `HYBRIS_BC policy=... emulated=0x... texture_compression=...`
+or `HYBRIS_BC refused: <reason>`. DX12 is not covered yet: VKD3D-Proton needs push descriptors,
+which the layer hides while it emulates a format.
+
 `HYBRIS_BC_TEXTURES=dxvk` enables a restricted GPU decoding profile in the
 hybris compatibility layer. It is opt-in through the launcher's remembered
 graphics choice.
 Use the format-checking DXVK built by `tools/dxvk/build.sh` with this profile.
-The global `textureCompressionBC` feature remains false.
+The global `textureCompressionBC` feature is reported true only when all fourteen Direct3D BC formats are covered (see the `texture_compression=` field of the `HYBRIS_BC` log line).
 
 ## Launcher setup
 
