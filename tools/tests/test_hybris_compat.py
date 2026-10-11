@@ -67,7 +67,7 @@ class HybrisCompatTest(unittest.TestCase):
         ran = subprocess.run([str(program), *args], capture_output=True, text=True, errors="replace", timeout=60,
                              env=environment, cwd=self.tmp.name)
         log = Path(self.tmp.name) / "drm_test_stderr.txt"
-        detail = log.read_text(errors="replace") if program.name == "drm-properties" and log.is_file() else ""
+        detail = log.read_text(errors="replace") if program.name.startswith("drm-") and log.is_file() else ""
         self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr + detail)
         return ran
 
@@ -94,6 +94,11 @@ class HybrisCompatTest(unittest.TestCase):
                    "-I", str(self.include), "-I", str(self.vulkan), str(self.vulkan / "layer/physical.c")]
         checked = subprocess.run(command, capture_output=True, text=True, errors="replace")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_unregistered_device_gets_no_drm_fill(self):
+        program = self.build("drm-layer", [TESTS / "hybris_drm_layer_test.c", self.vulkan / "layer/physical.c",
+                                           self.vulkan / "compat/drm_properties.c"])
+        self.run_program(program)
 
 
 if __name__ == "__main__":

@@ -201,7 +201,7 @@ index 0000000..5286e46
 +    VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, hybris_drm_node_fn render_node);
 +#endif
 diff --git a/hybris/vulkan/layer/physical.c b/hybris/vulkan/layer/physical.c
-index 29a295e..7ec026e 100644
+index 29a295e..8304f4f 100644
 --- a/hybris/vulkan/layer/physical.c
 +++ b/hybris/vulkan/layer/physical.c
 @@ -6,6 +6,7 @@
@@ -212,21 +212,22 @@ index 29a295e..7ec026e 100644
  #include <stdlib.h>
  #include <string.h>
  
-@@ -87,8 +88,28 @@ static VkResult VKAPI_CALL enumerate_device_extensions(VkPhysicalDevice physical
+@@ -87,8 +88,29 @@ static VkResult VKAPI_CALL enumerate_device_extensions(VkPhysicalDevice physical
      return properties && written < kept ? VK_INCOMPLETE : VK_SUCCESS;
  }
  
 +/* Outermost properties2 handler: a chained VkPhysicalDeviceDrmPropertiesEXT whose
 + * render fields the driver left untouched is filled from the render node. The next
-+ * handler is the clip, shader or BC policy's, else the driver's. */
++ * handler is the clip, shader or BC policy's, else the driver's. The lookup is also
++ * the registration guard: an unknown handle gets no fill. */
 +static void properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, const char *name)
 +{
++    struct hybris_layer_physical context;
++    if (!hybris_layer_lookup_physical(physical, &context)) return;
 +    PFN_vkGetPhysicalDeviceProperties2 query = (void *)hybris_clip_policy_proc(name);
 +    if (!query) query = (void *)hybris_shader_policy_proc(name);
 +    if (!query) query = (void *)hybris_bc_policy_proc(name);
-+    struct hybris_layer_physical context;
-+    if (!query && hybris_layer_lookup_physical(physical, &context))
-+        query = (void *)context.resolver(context.instance, name);
++    if (!query) query = (void *)context.resolver(context.instance, name);
 +    if (query) hybris_drm_query(query, physical, out, hybris_drm_render_node);
 +}
 +static void VKAPI_CALL properties2_core(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out)

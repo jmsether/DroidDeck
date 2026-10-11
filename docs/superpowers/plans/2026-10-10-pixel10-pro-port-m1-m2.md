@@ -713,7 +713,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 New compat module `hybris/vulkan/compat/drm_properties.{c,h}` and an outermost `vkGetPhysicalDeviceProperties2[KHR]` handler in `layer/physical.c`. Protocol (as reworked after review, commit "hybris: per-field DRM fill, true bypass, no sentinel leaks"): paint the six fields of the chained `VkPhysicalDeviceDrmPropertiesEXT` with a sentinel and call down. Every field still holding the sentinel is restored from the application's bytes, so no sentinel ever reaches the app. If all three render fields were untouched, fill `hasRender`/`renderMajor`/`renderMinor` from `stat("/dev/dri/renderD128")`, and clear the primary group only if it was entirely untouched (PowerVR sessions use gamescope's SDL backend, which needs no primary node). Render fields written by the driver: pass through. No node: untouched fields restored. One stderr line per outcome per process (`HYBRIS_DRM_PROPERTIES outcome=…`). `HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES=0` disables it.
 
 **Files:**
-- Create: `tools/tests/hybris_drm_properties_test.c` (Appendix C)
+- Create: `tools/tests/hybris_drm_properties_test.c` and `tools/tests/hybris_drm_layer_test.c` (Appendix C, both blocks)
 - Modify: `tools/tests/test_hybris_compat.py`
 - Create: `tools/hybris/patches/0002-drm-properties.patch` (Appendix A)
 
@@ -740,7 +740,7 @@ Copy Appendix A verbatim to `tools/hybris/patches/0002-drm-properties.patch`. Ch
 - [ ] **Step 4: Run it again**
 
 WSL: `python3 -m unittest tools.tests.test_hybris_compat -v`
-Expected: all tests `ok` (after the review rework the module has three: the characterization test, `test_drm_properties_fill`, `test_layer_properties_handler_compiles`; the captured harness output is shown only when a test fails).
+Expected: all tests `ok` (after the review rework the module has four: the characterization test, `test_drm_properties_fill`, `test_layer_properties_handler_compiles`, `test_unregistered_device_gets_no_drm_fill`; the captured harness output is shown only when a test fails).
 
 - [ ] **Step 5: Standard checks, then commit**
 
@@ -1654,7 +1654,7 @@ index 0000000..5286e46
 +    VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, hybris_drm_node_fn render_node);
 +#endif
 diff --git a/hybris/vulkan/layer/physical.c b/hybris/vulkan/layer/physical.c
-index 29a295e..7ec026e 100644
+index 29a295e..8304f4f 100644
 --- a/hybris/vulkan/layer/physical.c
 +++ b/hybris/vulkan/layer/physical.c
 @@ -6,6 +6,7 @@
@@ -1665,21 +1665,22 @@ index 29a295e..7ec026e 100644
  #include <stdlib.h>
  #include <string.h>
  
-@@ -87,8 +88,28 @@ static VkResult VKAPI_CALL enumerate_device_extensions(VkPhysicalDevice physical
+@@ -87,8 +88,29 @@ static VkResult VKAPI_CALL enumerate_device_extensions(VkPhysicalDevice physical
      return properties && written < kept ? VK_INCOMPLETE : VK_SUCCESS;
  }
  
 +/* Outermost properties2 handler: a chained VkPhysicalDeviceDrmPropertiesEXT whose
 + * render fields the driver left untouched is filled from the render node. The next
-+ * handler is the clip, shader or BC policy's, else the driver's. */
++ * handler is the clip, shader or BC policy's, else the driver's. The lookup is also
++ * the registration guard: an unknown handle gets no fill. */
 +static void properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, const char *name)
 +{
++    struct hybris_layer_physical context;
++    if (!hybris_layer_lookup_physical(physical, &context)) return;
 +    PFN_vkGetPhysicalDeviceProperties2 query = (void *)hybris_clip_policy_proc(name);
 +    if (!query) query = (void *)hybris_shader_policy_proc(name);
 +    if (!query) query = (void *)hybris_bc_policy_proc(name);
-+    struct hybris_layer_physical context;
-+    if (!query && hybris_layer_lookup_physical(physical, &context))
-+        query = (void *)context.resolver(context.instance, name);
++    if (!query) query = (void *)context.resolver(context.instance, name);
 +    if (query) hybris_drm_query(query, physical, out, hybris_drm_render_node);
 +}
 +static void VKAPI_CALL properties2_core(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out)
@@ -2446,6 +2447,119 @@ int main(void)
     if (disabled) assert(lines == 0);
     else assert(lines == 3 && filled == 1 && answered == 1 && nonode == 1);
     printf("drm_properties: all checks passed\n");
+    return 0;
+}
+~~~~
+
+#### `tools/tests/hybris_drm_layer_test.c`
+
+~~~~c
+/* The layer's properties2 handlers (layer/physical.c) against stubbed policies: a device handle the layer
+ * does not know gets no DRM fill, even when a policy handler returns without calling the driver. */
+#define VK_NO_PROTOTYPES
+#include "layer/layer.h"
+#include "compat/bc_policy.h"
+#include "compat/clip_distance.h"
+#include "compat/drm_properties.h"
+#include "compat/shader_dispatch.h"
+#include "compat/shader_policy.h"
+#include "compat/vertex_stores.h"
+#include <assert.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#define REGISTERED ((VkPhysicalDevice)(uintptr_t)2)
+#define UNREGISTERED ((VkPhysicalDevice)(uintptr_t)1)
+#define PAYLOAD offsetof(VkPhysicalDeviceDrmPropertiesEXT, hasPrimary)
+
+static int driver_calls, clip_present;
+
+/* The driver never touches the DRM structure. */
+static void VKAPI_CALL driver_properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out)
+{ (void)physical; (void)out; ++driver_calls; }
+static PFN_vkVoidFunction VKAPI_CALL resolver(VkInstance instance, const char *name)
+{ (void)instance; return strstr(name, "vkGetPhysicalDeviceProperties2") ? (PFN_vkVoidFunction)driver_properties2 : NULL; }
+
+int hybris_layer_lookup_physical(VkPhysicalDevice physical, struct hybris_layer_physical *out)
+{
+    *out = (struct hybris_layer_physical){0};
+    if (physical != REGISTERED) return 0;
+    out->resolver = resolver;
+    return 1;
+}
+/* Like the clip handler: for an unknown device it returns without calling down. */
+static void VKAPI_CALL clip_properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out)
+{
+    struct hybris_layer_physical context;
+    if (!hybris_layer_lookup_physical(physical, &context)) return;
+    driver_properties2(physical, out);
+}
+PFN_vkVoidFunction hybris_clip_policy_proc(const char *name)
+{ return clip_present && strstr(name, "vkGetPhysicalDeviceProperties2") ? (PFN_vkVoidFunction)clip_properties2 : NULL; }
+
+PFN_vkVoidFunction hybris_shader_policy_proc(const char *name) { (void)name; return NULL; }
+PFN_vkVoidFunction hybris_bc_policy_proc(const char *name) { (void)name; return NULL; }
+int hybris_bc_enabled(void) { return 0; }
+int hybris_bc_extension_allowed(const char *name) { (void)name; return 1; }
+int hybris_bc_format_properties(VkPhysicalDevice physical, VkFormat format, VkFormatProperties *properties)
+{ (void)physical; (void)format; (void)properties; return 0; }
+unsigned hybris_bc_physical_mask(VkPhysicalDevice physical) { (void)physical; return 0; }
+int hybris_scaled_enabled(void) { return 0; }
+void hybris_scaled_format(PFN_vkGetPhysicalDeviceFormatProperties query, VkPhysicalDevice physical,
+                          VkFormat format, VkFormatProperties *properties)
+{ (void)query; (void)physical; (void)format; (void)properties; }
+int hybris_shader_extension_allowed(const char *name) { (void)name; return 1; }
+unsigned hybris_shader_physical_mask(VkPhysicalDevice physical) { (void)physical; return 0; }
+int hybris_vertex_stores_active(VkPhysicalDevice physical) { (void)physical; return 0; }
+
+/* Stderr is redirected to `path`: counts the HYBRIS_DRM_PROPERTIES lines written so far. */
+static unsigned drm_lines(const char *path)
+{
+    fflush(stderr);
+    FILE *log = fopen(path, "r");
+    assert(log);
+    char line[512];
+    unsigned lines = 0;
+    while (fgets(line, sizeof line, log)) lines += !!strstr(line, "HYBRIS_DRM_PROPERTIES outcome=");
+    fclose(log);
+    return lines;
+}
+
+int main(void)
+{
+    static const char *const names[] = {"vkGetPhysicalDeviceProperties2", "vkGetPhysicalDeviceProperties2KHR"};
+    const char *path = "drm_test_stderr.txt";
+    if (!freopen(path, "w", stderr)) return 1;
+
+    /* The application's own values; no payload byte is the sentinel. */
+    VkPhysicalDeviceDrmPropertiesEXT drm = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
+        .hasPrimary = VK_TRUE, .primaryMajor = 11, .primaryMinor = 12, .hasRender = VK_FALSE, .renderMajor = 42, .renderMinor = 43};
+    const VkPhysicalDeviceDrmPropertiesEXT before = drm;
+    VkPhysicalDeviceProperties2 out = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drm};
+
+    /* 1. An unknown device handle: the driver is not reached, the structure is untouched, nothing is reported.
+     * It must hold with and without a clip handler that returns early for an unknown device. */
+    for (clip_present = 0; clip_present <= 1; ++clip_present)
+        for (unsigned i = 0; i < 2; ++i) {
+            PFN_vkGetPhysicalDeviceProperties2 handler = (PFN_vkGetPhysicalDeviceProperties2)hybris_layer_physical_proc(names[i]);
+            assert(handler);
+            handler(UNREGISTERED, &out);
+            assert(driver_calls == 0 && !memcmp((char *)&drm + PAYLOAD, (const char *)&before + PAYLOAD, sizeof drm - PAYLOAD));
+            assert(drm_lines(path) == 0);
+        }
+
+    /* 2. Control: a registered device does reach the driver through every route, and the DRM protocol runs
+     * (one line for its outcome, which depends on the host's render node). */
+    for (clip_present = 0; clip_present <= 1; ++clip_present)
+        for (unsigned i = 0; i < 2; ++i) {
+            PFN_vkGetPhysicalDeviceProperties2 handler = (PFN_vkGetPhysicalDeviceProperties2)hybris_layer_physical_proc(names[i]);
+            int calls = driver_calls;
+            handler(REGISTERED, &out);
+            assert(driver_calls == calls + 1);
+        }
+    assert(drm_lines(path) == 1);
+    printf("drm_layer: all checks passed\n");
     return 0;
 }
 ~~~~
