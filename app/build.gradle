@@ -149,6 +149,9 @@ android {
         release {
             minifyEnabled false
             signingConfig signingConfigs.testkey
+            // Pixel 10 fork: lets `tools/pixel10/pixel10.py logs` pull files/logs over USB with
+            // run-as. It also lets adb on a trusted PC read the rest of the app's private data.
+            debuggable true
         }
         configureEach {
             // CI supplies the PR head SHA even when building its merge with main.
