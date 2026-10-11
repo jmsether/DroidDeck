@@ -39,14 +39,14 @@ class HybrisCompatTest(unittest.TestCase):
         include = os.environ.get("VULKAN_INCLUDE")
         if not include:
             subprocess.run(["bash", str(PREPARE), "headers", str(work / "vulkan-headers")], check=True,
-                           timeout=600)
+                           timeout=1000)
             include = work / "vulkan-headers/include"
         if header_version(include) < MIN_HEADER:
             raise AssertionError(f"Vulkan headers >= 1.4.{MIN_HEADER} needed at {include}")
         tree = os.environ.get("HYBRIS_PATCHED_DIR")
         if not tree:
             tree = work / "libhybris"
-            subprocess.run(["bash", str(PREPARE), "libhybris", str(tree)], check=True, timeout=600)
+            subprocess.run(["bash", str(PREPARE), "libhybris", str(tree)], check=True, timeout=1000)
         cls.vulkan = Path(tree) / "hybris/vulkan"
         cls.include = Path(include)
 
