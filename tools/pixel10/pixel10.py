@@ -241,7 +241,7 @@ def logs(adb: Adb, out: Path) -> int:
         print(f"pixel10: could not list /sdcard/Download (adb exit {listed.returncode}):\n{text(listed)}", file=sys.stderr)
         return 3
     names = text(listed).splitlines()
-    zips =[n for n in names if SHARE_ZIP.match(n)]
+    zips = [n for n in names if SHARE_ZIP.match(n)]
     if zips:
         pulled = adb.run("pull", f"/sdcard/Download/{zips[0]}", str(out / zips[0]), timeout=300)
         print(text(pulled).strip())

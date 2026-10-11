@@ -2737,7 +2737,9 @@ int main(int argc, char **argv)
 #define MAX_EXT 1024
 #define MAX_PD 4
 #define MAX_NODES 64
+#ifndef SECTION_TIMEOUT_S
 #define SECTION_TIMEOUT_S 60
+#endif
 
 #include "hwvulkan_abi.h"
 
@@ -3385,7 +3387,7 @@ def compile_command(clang, source, output):
 
 
 def is_aarch64_elf(header):
-    return header[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<H", header, 18)[0] == 183
+    return len(header) >= 20 and header[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<H", header, 18)[0] == 183
 
 
 def main():
@@ -3413,15 +3415,16 @@ if __name__ == "__main__":
 #!/usr/bin/env python3
 """Pixel 10 bring-up over ADB: device facts (phase 0), the property probe (phase 1), session logs (phase 2).
 
-    python tools/pixel10/pixel10.py facts   [--out DIR]
-    python tools/pixel10/pixel10.py probe   PVR_PROPS_PROBE [--hal PATH] [--out DIR]
-    python tools/pixel10/pixel10.py logs    [--out DIR]
-    python tools/pixel10/pixel10.py install APK
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] facts   [--out DIR]
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] probe   PVR_PROPS_PROBE [--hal PATH] [--out DIR]
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] logs    [--out DIR]
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] install APK
 
-adb is found through --adb, ADB, PATH or ANDROID_HOME/ANDROID_SDK_ROOT; the device through --serial,
-ADB_SERIAL / ANDROID_SERIAL or the only authorized one (tools/adb_device.py). `facts` only reads.
-`probe` pushes one file to /data/local/tmp/pixel10. `install` replaces the app in place and never
-uninstalls anything. Exit codes: 0 done, 2 bad arguments, 3 adb or device error, 4 needs the user.
+--adb and --serial go before the subcommand. adb is found through --adb, ADB, PATH or
+ANDROID_HOME/ANDROID_SDK_ROOT; the device through --serial, ADB_SERIAL / ANDROID_SERIAL or the only
+authorized one (tools/adb_device.py). `facts` only reads. `probe` pushes one file to
+/data/local/tmp/pixel10. `install` replaces the app in place and never uninstalls anything.
+Exit codes: 0 done, 2 bad arguments, 3 adb or device error, 4 needs the user.
 """
 from __future__ import annotations
 
@@ -3437,13 +3440,21 @@ import sys
 import tarfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(HERE.parent)]  # this folder (build_props_probe) and tools/ (adb_device)
 from adb_device import DeviceResolutionError, resolve_serial  # noqa: E402
+from build_props_probe import is_aarch64_elf  # noqa: E402
 
 PACKAGE = "com.droiddeck.launcher"
 REMOTE = "/data/local/tmp/pixel10"
 SESSION_FOLDER = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{2,}-.+$")
 SHARE_ZIP = re.compile(r"^DroidDeck-.+\.zip$")
+TIMED_OUT = 124  # the exit status timeout(1) uses; what a command that outlived its time limit reports
+SECTIONS = ("loader", "hal")  # the probe prints a section.<name>= line for each, whatever the driver does
+# Probe lines echoed to the console: the ones the bring-up gates read. props.txt has everything.
+SUMMARY = re.compile(
+    r"section\.|hal\.(driver\.|drm\.(state|fields)|device\.(version|apiVersion)|bc\.|queue\.(count|family)"
+    r"|native_buffer\.(spec_version|device|gralloc_fns|usage\.))")
 
 # Identity of the build under test: no serial number, account or network name.
 PROPS = (
@@ -3482,8 +3493,12 @@ RAW = [
     ("ld.config.txt", "cat /linkerconfig/ld.config.txt"),
     ("cpuinfo.txt", "cat /proc/cpuinfo"),
     ("vkjson.json", "cmd gpu vkjson"),
-    ("dumpsys-gpu.txt", "dumpsys gpu"),
+    ("dumpsys-gpu.txt", "dumpsys gpu --global"),  # --global: the per-app records name the installed packages
 ]
+
+
+class AdbError(Exception):
+    """adb itself could not be run (not found, not executable). Exit code 3."""
 
 
 class Adb:
@@ -3493,10 +3508,13 @@ class Adb:
         self.exe, self.serial = exe, serial
 
     def run(self, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+        argv = [self.exe, "-s", self.serial, *args]
         try:
-            return subprocess.run([self.exe, "-s", self.serial, *args], capture_output=True, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise SystemExit(f"pixel10: adb failed: {error}") from error
+            return subprocess.run(argv, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired as hung:  # one hung command costs itself only; what it printed is kept
+            return subprocess.CompletedProcess(argv, TIMED_OUT, hung.stdout or b"", b"timeout")
+        except OSError as error:
+            raise AdbError(f"adb failed: {error}") from error
 
     def shell(self, command: str, timeout: float = 60) -> subprocess.CompletedProcess:
         return self.run("shell", command, timeout=timeout)
@@ -3518,25 +3536,60 @@ def section(config: str, name: str) -> str:
 
 
 def facts(adb: Adb, out: Path) -> int:
+    """Every command runs and is written down, failed or not. A run where none of them worked is exit 3."""
     out.mkdir(parents=True, exist_ok=True)
-    report = []
+    report, codes = [], []
     for heading, command in FACTS:
         result = adb.shell(command)
+        codes.append(result.returncode)
         report.append(f"### {heading}\n$ {command}\n{text(result)}[exit {result.returncode}]\n")
     for name, command in RAW:
         result = adb.shell(command, timeout=120)
+        codes.append(result.returncode)
         (out / name).write_bytes(result.stdout)
         report.append(f"### {name}\n$ {command}\n[{len(result.stdout)} bytes saved, exit {result.returncode}]\n")
     config = (out / "ld.config.txt").read_text("utf-8", "replace")
     (out / "ld.config.system.txt").write_text(section(config, "system"), "utf-8")
     (out / "facts.txt").write_text("\n".join(report), "utf-8")
     print(f"facts written to {out / 'facts.txt'}")
+    if all(codes):
+        print("pixel10: every command failed; is the phone connected, unlocked and authorized?", file=sys.stderr)
+        return 3
     return 0
 
 
-def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
+def refuse(problem: str | None) -> bool:
+    """Print a problem with a local file argument; True when there is one (exit 2)."""
+    if problem:
+        print(f"pixel10: {problem}", file=sys.stderr)
+    return problem is not None
+
+
+def probe_problem(binary: Path) -> str | None:
     if not binary.is_file():
-        print(f"pixel10: no such probe binary: {binary}", file=sys.stderr)
+        return f"no such probe binary: {binary}"
+    try:
+        with binary.open("rb") as file:
+            header = file.read(64)
+    except OSError as error:
+        return f"cannot read the probe binary {binary}: {error}"
+    if not is_aarch64_elf(header):
+        return f"{binary} is not an ELF64 AArch64 executable; build it with tools/pixel10/build_props_probe.py"
+    return None
+
+
+def apk_problem(apk: Path) -> str | None:
+    return None if apk.is_file() else f"no such APK: {apk}"
+
+
+# Command -> check of its file argument, run before any device is touched.
+FILE_CHECKS = {"probe": probe_problem, "install": apk_problem}
+
+
+def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
+    """Exit 3 when the probe could not run (adb exit >= 124: timeout, not executable, killed) or its output ends
+    before both section lines; a section that died is itself a fact in props.txt, not a failure of this command."""
+    if refuse(probe_problem(binary)):
         return 2
     out.mkdir(parents=True, exist_ok=True)
     adb.shell(f"mkdir -p {REMOTE}")
@@ -3549,9 +3602,15 @@ def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
     (out / "props.txt").write_bytes(ran.stdout)
     (out / "props.stderr.txt").write_bytes(ran.stderr)
     for line in text(ran).splitlines():
-        if re.match(r"(section\.|hal\.(driver\.|drm\.state|device\.version|bc\.|native_buffer\.(spec|gralloc)))", line):
+        if SUMMARY.match(line):
             print(line)
     print(f"probe output written to {out / 'props.txt'} (adb exit {ran.returncode})")
+    lines = ran.stdout.decode("utf-8", "replace").splitlines()
+    ended = all(any(line.startswith(f"section.{name}=") for line in lines) for name in SECTIONS)
+    if ran.returncode >= TIMED_OUT or not ended:
+        print(f"pixel10: probe output cut short (adb exit {ran.returncode}); see {out / 'props.txt'} "
+              f"and {out / 'props.stderr.txt'}", file=sys.stderr)
+        return 3
     return 0
 
 
@@ -3565,7 +3624,7 @@ def extract(data: bytes, out: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         for member in archive.getmembers():
             if member.name.startswith(("/", "\\")) or ".." in Path(member.name).parts:
-                raise SystemExit(f"pixel10: refusing tar member outside the output folder: {member.name}")
+                raise tarfile.TarError(f"refusing tar member outside the output folder: {member.name}")
         if hasattr(tarfile, "data_filter"):
             archive.extractall(out, filter="data")
         else:
@@ -3582,12 +3641,20 @@ def logs(adb: Adb, out: Path) -> int:
         if name:
             packed = adb.run("exec-out", f"run-as {PACKAGE} tar -cf - -C files/logs {shlex.quote(name)}", timeout=300)
             if packed.returncode == 0 and packed.stdout:
-                extract(packed.stdout, out)
+                try:
+                    extract(packed.stdout, out)
+                except (tarfile.TarError, OSError) as error:  # exec-out can hand back error text instead of a tar
+                    print(f"pixel10: the session folder {name} could not be unpacked: {error}", file=sys.stderr)
+                    return 3
                 print(f"session logs {name} written to {out / name}")
                 return 0
         print("pixel10: run-as works but no session folder could be read", file=sys.stderr)
         return 3
-    names = text(adb.shell("ls -t /sdcard/Download")).splitlines()
+    listed = adb.shell("ls -t /sdcard/Download")
+    if listed.returncode:  # an offline or hung phone is not the same as "no zip saved yet"
+        print(f"pixel10: could not list /sdcard/Download (adb exit {listed.returncode}):\n{text(listed)}", file=sys.stderr)
+        return 3
+    names = text(listed).splitlines()
     zips = [n for n in names if SHARE_ZIP.match(n)]
     if zips:
         pulled = adb.run("pull", f"/sdcard/Download/{zips[0]}", str(out / zips[0]), timeout=300)
@@ -3601,8 +3668,7 @@ def logs(adb: Adb, out: Path) -> int:
 
 
 def install(adb: Adb, apk: Path) -> int:
-    if not apk.is_file():
-        print(f"pixel10: no such APK: {apk}", file=sys.stderr)
+    if refuse(apk_problem(apk)):
         return 2
     result = adb.run("install", "-r", "--no-incremental", str(apk), timeout=600)
     output = text(result)
@@ -3622,7 +3688,7 @@ def adb_path(configured: str | None) -> str:
         if not found and sdk:
             found = shutil.which("adb", path=str(Path(sdk) / "platform-tools"))
     if not found:
-        raise SystemExit("pixel10: adb not found; set ADB to adb.exe or put platform-tools on PATH")
+        raise AdbError("adb not found; set ADB to adb.exe or put platform-tools on PATH")
     return found
 
 
@@ -3634,23 +3700,25 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for name in ("facts", "probe", "logs"):
         commands.add_parser(name).add_argument("--out", type=Path, default=Path("pixel10-runs") / stamp / name)
-    commands.choices["probe"].add_argument("binary", type=Path)
+    commands.choices["probe"].add_argument("file", type=Path, metavar="PVR_PROPS_PROBE")
     commands.choices["probe"].add_argument("--hal")
-    commands.add_parser("install").add_argument("apk", type=Path)
+    commands.add_parser("install").add_argument("file", type=Path, metavar="APK")
     args = parser.parse_args(argv)
-    exe = adb_path(args.adb)
+    if args.command in FILE_CHECKS and refuse(FILE_CHECKS[args.command](args.file)):
+        return 2  # before any device is looked for
     try:
+        exe = adb_path(args.adb)
         adb = Adb(exe, resolve_serial(exe, args.serial, log=True))
-    except DeviceResolutionError as error:
+        if args.command == "facts":
+            return facts(adb, args.out)
+        if args.command == "probe":
+            return probe(adb, args.file, args.hal, args.out)
+        if args.command == "logs":
+            return logs(adb, args.out)
+        return install(adb, args.file)
+    except (AdbError, DeviceResolutionError) as error:
         print(f"pixel10: {error}", file=sys.stderr)
         return 3
-    if args.command == "facts":
-        return facts(adb, args.out)
-    if args.command == "probe":
-        return probe(adb, args.binary, args.hal, args.out)
-    if args.command == "logs":
-        return logs(adb, args.out)
-    return install(adb, args.apk)
 
 
 if __name__ == "__main__":
@@ -3770,6 +3838,7 @@ int main(void) {
  *   FAKE_HAL_WIDE_USAGE=1                  gralloc producer usage needs more than 32 bits
  *   FAKE_HAL_VERSION=0x00010000            the hw_device_t version (default 0x00000001)
  *   FAKE_HAL_CRASH=1                       vkGetPhysicalDeviceProperties2 dies with SIGSEGV
+ *   FAKE_HAL_SPIN=1                        vkGetPhysicalDeviceProperties2 never returns
  *   FAKE_HAL_DRIVER_INFO=text              VkPhysicalDeviceDriverProperties::driverInfo (default 25.3@6908880)
  */
 #define _GNU_SOURCE
@@ -3834,6 +3903,8 @@ static void get_properties(VkPhysicalDevice pd, VkPhysicalDeviceProperties *p) {
 }
 static void get_properties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *p2) {
     if (!strcmp(env("FAKE_HAL_CRASH", "0"), "1")) raise(SIGSEGV);
+    if (!strcmp(env("FAKE_HAL_SPIN", "0"), "1"))
+        for (volatile unsigned long n = 0;; n++) {}
     get_properties(pd, &p2->properties);
     const char *drm = env("FAKE_HAL_DRM", "untouched");
     for (VkBaseOutStructure *n = p2->pNext; n; n = n->pNext) {
@@ -4090,6 +4161,21 @@ class PvrPropsProbeTest(unittest.TestCase):
         self.assertEqual(f["hal.device.name"], ["PowerVR D-Series DXT-48-1536 MC1"])  # printed before the crash
         self.assertIn("section.loader", f)
 
+    def test_a_hung_hal_is_killed_by_the_section_alarm_and_the_loader_section_still_completes(self):
+        # A probe built with a 1 s alarm (the default is 60 s) against a HAL whose properties call never returns.
+        quick = Path(self.temp.name) / "pvr_props_probe_alarm1"
+        command = [shutil.which(os.environ.get("CC", "cc")), *STRICT, *vulkan_include_args(), "-DSECTION_TIMEOUT_S=1",
+                   str(PROBE), "-ldl", "-o", str(quick)]
+        built = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, " ".join(command) + "\n" + built.stdout + built.stderr)
+        ran = subprocess.run([str(quick), str(self.fake)], capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "FAKE_HAL_SPIN": "1"})
+        f = facts(ran.stdout)
+        self.assertNotEqual(ran.returncode, 0)
+        self.assertEqual(f["section.hal"], ["killed signal=14"])  # SIGALRM
+        self.assertEqual(f["hal.device.name"], ["PowerVR D-Series DXT-48-1536 MC1"])  # printed before the hang
+        self.assertRegex(f["section.loader"][0], r"^exit=\d+$")  # ran to its end, whatever the host's loader said
+
     def test_driver_text_is_sanitized(self):
         # Control bytes and newlines in a driver string must not forge extra fact lines.
         _, f = self.run_probe(FAKE_HAL_DRIVER_INFO="25.3@1\nforged.key=1")
@@ -4157,6 +4243,8 @@ class BuildPropsProbeTest(unittest.TestCase):
         elf[18:20] = b"\x3e\x00"
         self.assertFalse(build.is_aarch64_elf(bytes(elf)))
         self.assertFalse(build.is_aarch64_elf(b"MZ" + bytes(62)))
+        self.assertFalse(build.is_aarch64_elf(b"\x7fELF\x02\x01"))  # too short to hold e_machine
+        self.assertFalse(build.is_aarch64_elf(b""))
 
 
 if __name__ == "__main__":
@@ -4172,6 +4260,9 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import re
+import shlex
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -4200,6 +4291,37 @@ def tar_of(files):
     return raw.getvalue()
 
 
+def elf(machine=183):
+    """The first 64 bytes of an ELF64 little-endian file for `machine` (183 = AArch64, 62 = x86-64)."""
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    header[18:20] = struct.pack("<H", machine)
+    return bytes(header)
+
+
+def simple_commands(line):
+    """Every simple command of a device shell line as its words: split on ; && | and read inside $( )."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    commands, words = [], []
+    for token in lexer:
+        if set(token) <= set("();&|<>"):
+            commands, words = commands + ([words] if words else []), []
+            continue
+        words.append(token)
+        for inner in re.findall(r"\$\(([^()]*)\)", token):
+            commands += simple_commands(inner)
+    return commands + ([words] if words else [])
+
+
+# The leading words of every command FACTS and RAW may run: reads only.
+READ_ONLY = {
+    ("for",), ("done",), ("echo",), ("getprop",), ("uname",), ("cat",), ("getconf",), ("grep",), ("zcat",), ("ls",),
+    ("head",), ("stat",), ("getenforce",), ("id",), ("df",), ("pm", "list"), ("settings", "get"), ("device_config", "get"),
+    ("dumpsys", "package", pixel10.PACKAGE), ("dumpsys", "gpu", "--global"), ("cmd", "gpu", "vkjson"),
+}
+
+
 class FakeAdb(pixel10.Adb):
     """Answers the first (needle, result) whose needle is in the command line; records every call."""
 
@@ -4216,7 +4338,9 @@ class FakeAdb(pixel10.Adb):
         return done()
 
 
-class Pixel10Test(unittest.TestCase):
+class Sandbox(unittest.TestCase):
+    """A scratch folder and a way to call a function with its output captured."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -4228,9 +4352,54 @@ class Pixel10Test(unittest.TestCase):
             code = call(*args)
         return code, out.getvalue(), err.getvalue()
 
-    def test_facts_are_read_only_and_identify_nothing(self):
+    def file(self, name, data):
+        path = Path(self.temp.name) / name
+        path.write_bytes(data)
+        return path
+
+
+class AdbTest(unittest.TestCase):
+    def test_argv_is_the_serial_then_the_command(self):
+        with mock.patch.object(pixel10.subprocess, "run", return_value=done(b"ok")) as run:
+            result = pixel10.Adb("adb", "S1").run("install", "-r", "--no-incremental", "a.apk", timeout=5)
+        run.assert_called_once_with(["adb", "-s", "S1", "install", "-r", "--no-incremental", "a.apk"],
+                                    capture_output=True, timeout=5)
+        self.assertEqual(result.stdout, b"ok")
+
+    def test_a_hung_command_is_exit_124_with_its_partial_output(self):
+        for partial, expected in ((b"half a line", b"half a line"), (None, b"")):
+            with self.subTest(partial=partial):
+                hung = subprocess.TimeoutExpired(["adb"], 5, output=partial)
+                with mock.patch.object(pixel10.subprocess, "run", side_effect=hung):
+                    result = pixel10.Adb("adb", "S1").shell("sleep 99", timeout=5)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (124, expected, b"timeout"))
+
+    def test_an_adb_that_cannot_run_is_an_adb_error(self):
+        with mock.patch.object(pixel10.subprocess, "run", side_effect=FileNotFoundError("adb")):
+            with self.assertRaises(pixel10.AdbError):
+                pixel10.Adb("adb", "S1").shell("true")
+
+
+class Pixel10Test(Sandbox):
+    def test_facts_commands_are_reads_only(self):
+        for name, command in pixel10.FACTS + pixel10.RAW:
+            with self.subTest(command=name):
+                for words in simple_commands(command):
+                    words = words[1:] if words[0] == "do" else words
+                    self.assertTrue(any(tuple(words[:len(verb)]) == verb for verb in READ_ONLY), words[:3])
+                for forbidden in ("--clear", "setprop", "settings put", "pm clear", "pm uninstall", "reboot", ">"):
+                    self.assertNotIn(forbidden, command)
+                self.assertNotRegex(command, r"(^|[\s;|&])rm\s")
+
+    def test_facts_identify_nothing(self):
         commands = " ".join(command for _, command in pixel10.FACTS + pixel10.RAW)
-        self.assertNotRegex(commands, r"serial|imei|meid|android_id|mac_addr|wifi|bluetooth|\bput\b|\bset\b|\brm\b|reboot")
+        self.assertNotRegex(commands, r"serial|imei|meid|android_id|mac_addr|wifi|bluetooth")
+
+    def test_gpu_stats_are_global_only(self):
+        # Per-app GpuStats records carry package names.
+        self.assertIn(("dumpsys-gpu.txt", "dumpsys gpu --global"), pixel10.RAW)
+        for _, command in pixel10.FACTS + pixel10.RAW:
+            self.assertNotRegex(command, r"dumpsys gpu(?! --global)")
 
     def test_facts_report_and_raw_files(self):
         adb = FakeAdb([("cat /linkerconfig/ld.config.txt", done(LD_CONFIG)), ("getprop", done(b"ro.board.platform=laguna\n")),
@@ -4244,14 +4413,36 @@ class Pixel10Test(unittest.TestCase):
         self.assertEqual((self.out / "ld.config.system.txt").read_text(), "[system]\nnamespace.default.isolated = false\n")
         self.assertEqual(len(adb.calls), len(pixel10.FACTS) + len(pixel10.RAW))
 
+    def test_facts_where_every_command_failed_are_still_written_but_not_a_success(self):
+        adb = FakeAdb([("", done(b"", 1, b"error: device offline"))])
+        code, _, err = self.quiet(pixel10.facts, adb, self.out)
+        self.assertEqual(code, 3)
+        self.assertIn("pixel10:", err)
+        report = (self.out / "facts.txt").read_text()
+        for heading, _ in pixel10.FACTS:
+            self.assertIn(f"### {heading}", report)
+        self.assertEqual(len(adb.calls), len(pixel10.FACTS) + len(pixel10.RAW))
+
+    def test_facts_with_one_failing_command_are_a_success(self):
+        code, _, _ = self.quiet(pixel10.facts, FakeAdb([("zcat", done(b"", 1))]), self.out)
+        self.assertEqual(code, 0)
+        self.assertIn("[exit 1]", (self.out / "facts.txt").read_text())
+
+    def test_a_command_that_timed_out_keeps_its_partial_output_and_the_run_going(self):
+        adb = FakeAdb([("cmd gpu vkjson", done(b'{"partial"', 124, b"timeout"))])
+        code, _, _ = self.quiet(pixel10.facts, adb, self.out)
+        self.assertEqual(code, 0)
+        self.assertEqual((self.out / "vkjson.json").read_bytes(), b'{"partial"')
+        self.assertIn("exit 124", (self.out / "facts.txt").read_text())
+        self.assertEqual(len(adb.calls), len(pixel10.FACTS) + len(pixel10.RAW))
+
     def test_section_of_a_missing_header_is_empty(self):
         self.assertEqual(pixel10.section("[a]\nx\n", "system"), "")
         self.assertEqual(pixel10.section("", "system"), "")
 
     def test_probe_pushes_runs_and_keeps_the_output(self):
-        binary = Path(self.temp.name) / "pvr_props_probe"
-        binary.write_bytes(b"\x7fELF")
-        adb = FakeAdb([("./pvr_props_probe", done(b"section.hal=exit=0\nhal.drm.state=untouched\nhal.fmt=BC7\n"))])
+        binary = self.file("pvr_props_probe", elf())
+        adb = FakeAdb([("./pvr_props_probe", done(b"section.loader=exit=0\nhal.drm.state=untouched\nhal.fmt=BC7\nsection.hal=exit=0\n"))])
         code, out, _ = self.quiet(pixel10.probe, adb, binary, "/vendor/lib64/hw/vulkan.powervr.so", self.out)
         self.assertEqual(code, 0)
         self.assertIn("hal.drm.state=untouched", out)
@@ -4266,6 +4457,69 @@ class Pixel10Test(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("no such probe binary", err)
 
+    def test_probe_refuses_a_file_that_is_not_an_aarch64_executable(self):
+        for header in (elf(62), b"MZ" + bytes(62), b"", b"\x7fELF\x02\x01"):  # x86-64, PE, empty, truncated
+            with self.subTest(header=header[:8]):
+                adb = FakeAdb()
+                code, _, err = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", header), None, self.out)
+                self.assertEqual(code, 2)
+                self.assertIn("AArch64", err)
+                self.assertEqual(adb.calls, [])  # nothing was pushed
+
+    def test_probe_that_could_not_run_is_not_a_success(self):
+        for code in (124, 126, 127, 139):  # timeout, not executable, not found, SIGSEGV
+            with self.subTest(adb_exit=code):
+                adb = FakeAdb([("./pvr_props_probe", done(b"section.loader=exit=0\n", code, b"sh: ./pvr_props_probe: failed"))])
+                result, _, err = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+                self.assertEqual(result, 3)
+                self.assertIn("pixel10:", err)
+
+    def test_probe_without_any_section_line_is_not_a_success(self):
+        adb = FakeAdb([("./pvr_props_probe", done(b"error: closed\n", 0))])
+        code, _, err = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+        self.assertEqual(code, 3)
+        self.assertEqual((self.out / "props.txt").read_bytes(), b"error: closed\n")  # kept for the user
+        self.assertIn("pixel10:", err)
+
+    def test_probe_output_cut_short_is_not_a_success(self):
+        # The probe always prints a section.loader= and a section.hal= line; adb can exit 1 (a dropped link) between them.
+        for stdout in (b"section.loader=exit=0\n", b"hal.drm.state=untouched\nsection.hal=exit=0\n", b"probe.version=1\n"):
+            with self.subTest(stdout=stdout):
+                adb = FakeAdb([("./pvr_props_probe", done(stdout, 1))])
+                code, _, err = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+                self.assertEqual(code, 3)
+                self.assertIn("probe output cut short", err)
+                self.assertEqual((self.out / "props.txt").read_bytes(), stdout)  # kept for the user
+
+    def test_probe_whose_section_died_still_reports_what_it_found(self):
+        adb = FakeAdb([("./pvr_props_probe", done(b"section.loader=exit=0\nsection.hal=killed signal=11\n", 1))])
+        code, out, _ = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+        self.assertEqual(code, 0)  # the facts are the result; what they say never changes the status
+        self.assertIn("section.hal=killed signal=11", out)
+
+    def test_probe_push_failure_is_exit_3(self):
+        adb = FakeAdb([("push", done(b"", 1, b"adb: error: failed to copy"))])
+        code, _, err = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+        self.assertEqual(code, 3)
+        self.assertIn("push failed", err)
+        self.assertEqual([c[0] for c in adb.calls], ["shell", "push"])
+
+    def test_probe_echoes_the_lines_the_bring_up_gates_read(self):
+        gates = ["hal.drm.state=untouched", "hal.drm.fields=hasPrimary=0xcdcdcdcd hasRender=0xcdcdcdcd",
+                 "hal.native_buffer.spec_version=11 (icd needs >= 8)", "hal.native_buffer.device=vkCreateDevice=0 family=0",
+                 "hal.native_buffer.gralloc_fns=v1=0 v2=1 v3=0 v4=0 (icd.c calls v2)",
+                 "hal.native_buffer.usage.RGBA8.use0x10=v2 result=0 exceeds_32_bits=0",
+                 "hal.queue.count=1", "hal.queue.family=0 flags=0x7 count=2 granularity=1x1x1",
+                 "hal.device.version=0x00000001 accepted_by_upstream_hybris=0 accepted_by_powervr_patch=1",
+                 "hal.device.apiVersion=1.4.317", "hal.driver.info=25.3@6908880",
+                 "hal.driver.release=25.3 build=6908880 build_matches_driverVersion=1"]
+        noise = ["probe.version=1", "hal.ext=VK_KHR_driver_properties", "hal.fmt=BC7_UNORM_BLOCK optimal=0x0", "loader.device.name=x"]
+        stdout = "\n".join(["section.loader=exit=0", *noise[:2], *gates, *noise[2:], "section.hal=exit=0"]).encode() + b"\n"
+        adb = FakeAdb([("./pvr_props_probe", done(stdout))])
+        code, out, _ = self.quiet(pixel10.probe, adb, self.file("pvr_props_probe", elf()), None, self.out)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[:-1], ["section.loader=exit=0", *gates, "section.hal=exit=0"])
+
     def test_logs_from_a_debuggable_build_take_the_newest_session(self):
         packed = tar_of({"2026-10-10-02-steam/session.log": b"hello"})
         adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n2026-10-10-02-steam\ntools\nstores\n")),
@@ -4276,11 +4530,30 @@ class Pixel10Test(unittest.TestCase):
         self.assertIn("-C files/logs 2026-10-10-02-steam", [c for c in adb.calls if c[0] == "exec-out"][0][1])
 
     def test_logs_refuse_a_tar_that_escapes_the_output_folder(self):
-        evil = tar_of({"../evil.txt": b"x"})
-        adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")), ("exec-out", done(evil))])
-        with self.assertRaisesRegex(SystemExit, "outside the output folder"):
-            self.quiet(pixel10.logs, adb, self.out)
-        self.assertFalse((self.out.parent / "evil.txt").exists())
+        for name in ("../evil.txt", "/tmp/evil.txt"):
+            with self.subTest(member=name):
+                evil = tar_of({"2026-10-10-01-steam/ok.log": b"y", name: b"x"})
+                adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")), ("exec-out", done(evil))])
+                code, _, err = self.quiet(pixel10.logs, adb, self.out)
+                self.assertEqual(code, 3)
+                self.assertIn("outside the output folder", err)
+                self.assertFalse((self.out.parent / "evil.txt").exists())
+                self.assertEqual(list(self.out.iterdir()), [])  # the whole unpack was refused, not just the bad member
+
+    def test_logs_that_got_error_text_instead_of_a_tar_are_exit_3(self):
+        adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")),
+                       ("exec-out", done(b"run-as: couldn't stat files/logs/2026-10-10-01-steam\n"))])
+        code, _, err = self.quiet(pixel10.logs, adb, self.out)
+        self.assertEqual(code, 3)
+        self.assertIn("pixel10:", err)
+
+    def test_logs_that_cannot_be_written_are_exit_3(self):
+        adb = FakeAdb([("ls -1 files/logs", done(b"2026-10-10-01-steam\n")),
+                       ("exec-out", done(tar_of({"2026-10-10-01-steam/session.log": b"x"})))])
+        with mock.patch.object(tarfile.TarFile, "extractall", side_effect=OSError("No space left on device")):
+            code, _, err = self.quiet(pixel10.logs, adb, self.out)
+        self.assertEqual(code, 3)
+        self.assertIn("No space left", err)
 
     def test_logs_from_a_release_build_use_the_shared_zip(self):
         adb = FakeAdb([("run-as", done(b"run-as: package not debuggable", 1)),
@@ -4289,6 +4562,13 @@ class Pixel10Test(unittest.TestCase):
         self.assertEqual(code, 0)
         pull = [c for c in adb.calls if c[0] == "pull"][0]
         self.assertEqual(pull[1], "/sdcard/Download/DroidDeck-2026-10-10-02-steam.zip")
+
+    def test_logs_from_a_phone_that_cannot_list_downloads_are_exit_3_not_advice(self):
+        adb = FakeAdb([("run-as", done(b"not debuggable", 1)), ("ls -t /sdcard/Download", done(b"", 124, b"timeout"))])
+        code, _, err = self.quiet(pixel10.logs, adb, self.out)
+        self.assertEqual(code, 3)
+        self.assertNotIn("Share logs", err)  # this is a phone problem, not a missing zip
+        self.assertIn("/sdcard/Download", err)
 
     def test_logs_without_any_route_say_how_to_make_one(self):
         adb = FakeAdb([("run-as", done(b"not debuggable", 1))])
@@ -4303,8 +4583,7 @@ class Pixel10Test(unittest.TestCase):
         code, _, err = self.quiet(pixel10.install, adb, apk)
         self.assertEqual(code, 4)
         self.assertIn("adb uninstall com.droiddeck.launcher", err)
-        self.assertEqual([c[0] for c in adb.calls], ["install"])
-        self.assertEqual(adb.calls[0][:3], ("install", "-r", "--no-incremental"))
+        self.assertEqual(adb.calls, [("install", "-r", "--no-incremental", str(apk))])
 
     def test_install_reports_success(self):
         apk = Path(self.temp.name) / "a.apk"
@@ -4334,8 +4613,88 @@ class Pixel10Test(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch("shutil.which", return_value="from-path"):
             self.assertEqual(pixel10.adb_path(None), "from-path")
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch("shutil.which", return_value=None):
-            with self.assertRaises(SystemExit):
+            with self.assertRaisesRegex(pixel10.AdbError, "adb not found"):
                 pixel10.adb_path(None)
+
+
+class MainTest(Sandbox):
+    """main(): argument checks, exit codes, and how the pieces are wired. No adb, no device."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = FakeAdb()
+        self.adb_path = self.patch("adb_path", return_value="adb")
+        self.resolve = self.patch("resolve_serial", return_value="fake-1")
+        self.make_adb = self.patch("Adb", return_value=self.fake)
+
+    def patch(self, name, **kwargs):
+        patcher = mock.patch.object(pixel10, name, **kwargs)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def main(self, *argv):
+        return self.quiet(pixel10.main, list(argv))
+
+    def no_device_was_touched(self):
+        self.adb_path.assert_not_called()
+        self.resolve.assert_not_called()
+        self.assertEqual(self.fake.calls, [])
+
+    def test_bad_arguments_are_exit_2(self):
+        for argv in ((), ("explode",), ("probe",), ("install",), ("facts", "--serial", "S1")):  # --serial goes before the subcommand
+            with self.subTest(argv=argv), self.assertRaises(SystemExit) as raised:
+                self.main(*argv)
+            self.assertEqual(raised.exception.code, 2)
+        self.no_device_was_touched()
+
+    def test_a_missing_local_file_is_exit_2_before_any_device_is_touched(self):
+        for argv, message in ((("probe", str(self.out / "missing")), "no such probe binary"),
+                              (("install", str(self.out / "missing.apk")), "no such APK"),
+                              (("probe", str(self.file("x86", elf(62)))), "AArch64")):
+            with self.subTest(argv=argv):
+                code, _, err = self.main(*argv)
+                self.assertEqual(code, 2)
+                self.assertIn(message, err)
+        self.no_device_was_touched()
+
+    def test_adb_not_found_is_exit_3(self):
+        self.adb_path.side_effect = pixel10.AdbError("adb not found; set ADB")
+        code, _, err = self.main("facts", "--out", str(self.out))
+        self.assertEqual(code, 3)
+        self.assertIn("adb not found", err)
+        self.resolve.assert_not_called()
+
+    def test_no_authorized_device_is_exit_3(self):
+        self.resolve.side_effect = pixel10.DeviceResolutionError("No authorized Android device found")
+        code, _, err = self.main("facts", "--out", str(self.out))
+        self.assertEqual(code, 3)
+        self.assertIn("No authorized Android device found", err)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_adb_failing_in_the_middle_of_a_command_is_exit_3(self):
+        self.fake.run = mock.Mock(side_effect=pixel10.AdbError("adb failed: [WinError 2]"))
+        code, _, err = self.main("facts", "--out", str(self.out))
+        self.assertEqual(code, 3)
+        self.assertIn("adb failed", err)
+
+    def test_adb_and_serial_options_reach_the_resolver_and_install_gets_its_full_argv(self):
+        apk = self.file("a.apk", b"PK")
+        self.fake.answers = [("install", done(b"Performing Streamed Install\nSuccess\n"))]
+        code, _, _ = self.main("--adb", "X", "--serial", "S1", "install", str(apk))
+        self.assertEqual(code, 0)
+        self.adb_path.assert_called_once_with("X")
+        self.resolve.assert_called_once_with("adb", "S1", log=True)
+        self.make_adb.assert_called_once_with("adb", "fake-1")
+        self.assertEqual(self.fake.calls, [("install", "-r", "--no-incremental", str(apk))])
+
+    def test_every_command_reaches_its_function_and_returns_its_exit_code(self):
+        # Every command fails except listing Download, so logs gets as far as the exit-4 advice.
+        self.fake.answers = [("ls -t /sdcard/Download", done()), ("", done(b"", 1, b"error: device offline"))]
+        self.assertEqual(self.main("facts", "--out", str(self.out / "facts"))[0], 3)
+        self.assertEqual(self.main("probe", str(self.file("p", elf())), "--hal", "/x/y.so", "--out", str(self.out / "probe"))[0], 3)
+        self.assertEqual(self.main("install", str(self.file("a.apk", b"PK")))[0], 3)
+        self.assertEqual(self.main("logs", "--out", str(self.out / "logs"))[0], 4)  # run-as fails, no zip in Download: needs the user
+        self.assertEqual(self.fake.calls[-1], ("shell", "ls -t /sdcard/Download"))
 
 
 if __name__ == "__main__":
