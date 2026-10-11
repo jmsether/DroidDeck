@@ -3,7 +3,9 @@ run-name: ${{ github.event_name == 'pull_request' && format('building pr {0} on 
 
 on:
   push:
-    branches: [ main ]
+    # pixel10: the Pixel 10 port's working branch on a personal fork, where workflow_dispatch is
+    # unavailable until the fork's default branch registers this file.
+    branches: [ main, pixel10 ]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
