@@ -88,6 +88,13 @@ class HybrisCompatTest(unittest.TestCase):
         self.run_program(program)
         self.run_program(program, HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES="0", EXPECT_DISABLED="1")
 
+    def test_layer_properties_handler_compiles(self):
+        # The properties2 handler is in the layer, which the DRM harness does not build.
+        command = [self.compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-pthread", "-fsyntax-only",
+                   "-I", str(self.include), "-I", str(self.vulkan), str(self.vulkan / "layer/physical.c")]
+        checked = subprocess.run(command, capture_output=True, text=True, errors="replace")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
