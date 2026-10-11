@@ -1,3 +1,10 @@
 # Diff context retains the exact upstream whitespace.
 tools/box64/patches/*.patch whitespace=-blank-at-eol
 tools/gamescope/patches/*.patch whitespace=-blank-at-eol,-space-before-tab
+# Read by bash and git apply on Linux and WSL; a CRLF checkout breaks both.
+*.sh text eol=lf
+*.patch text eol=lf
+tools/hybris/** text eol=lf
+tools/tests/*.c text eol=lf
+tools/tests/*.py text eol=lf
+tools/pixel10/** text eol=lf
