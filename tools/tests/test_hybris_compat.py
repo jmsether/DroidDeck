@@ -82,6 +82,12 @@ class HybrisCompatTest(unittest.TestCase):
         checked = subprocess.run(command, capture_output=True, text=True, errors="replace")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
+    def test_drm_properties_fill(self):
+        program = self.build("drm-properties", [TESTS / "hybris_drm_properties_test.c",
+                                                self.vulkan / "compat/drm_properties.c"])
+        self.run_program(program)
+        self.run_program(program, HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES="0", EXPECT_DISABLED="1")
+
 
 if __name__ == "__main__":
     unittest.main()

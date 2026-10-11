@@ -1,0 +1,212 @@
+diff --git a/docs/compatibility-defaults.md b/docs/compatibility-defaults.md
+index 4a31207..e7f5551 100644
+--- a/docs/compatibility-defaults.md
++++ b/docs/compatibility-defaults.md
+@@ -14,6 +14,7 @@ Native format support takes precedence; forced emulation remains opt-in.
+ | HYBRIS_VULKAN_COMPAT_INOUT | 1 | 0 |
+ | HYBRIS_VULKAN_COMPAT_IMAGE_BOUNDS | 1 | 0 |
+ | HYBRIS_VULKAN_COMPAT_VERTEX_STORES | 1, restricted to the inspected driver | 0 |
++| HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES | 1, only when the driver ignores the structure | 0 |
+ | HYBRIS_MALI_MMUD_SKIP_LOADER_CHECK | 1, restricted to the matching driver build | 0 |
+ 
+ The first seven switches remain disabled during secure execution. Existing
+diff --git a/hybris/vulkan/Makefile.am b/hybris/vulkan/Makefile.am
+index e033f7b..2fa943f 100644
+--- a/hybris/vulkan/Makefile.am
++++ b/hybris/vulkan/Makefile.am
+@@ -13,6 +13,7 @@ libVkLayer_hybris_compat_la_SOURCES = layer/entry.c layer/device.c layer/physica
+     compat/bc_image.c compat/bc_image.h compat/bc_command_state.c compat/bc_command_state.h compat/bc_transfer.c compat/bc_transfer.h \
+     compat/bc_context.c compat/bc_context.h compat/bc_commands.c compat/bc_resources.c compat/bc_record.c compat/bc_barriers.c compat/bc_image_copy.c compat/bc_policy.c compat/bc_policy.h \
+     compat/application_policy.c compat/application_policy.h \
++    compat/drm_properties.c compat/drm_properties.h \
+     compat/memory_visibility.c compat/memory_visibility.h compat/rendering_segments.c compat/rendering_segments.h \
+     compat/readback_record.c compat/readback_submit.c compat/readback.h \
+     compat/vertex_stores.c compat/vertex_stores.h compat/spirv_discard.c \
+diff --git a/hybris/vulkan/compat/drm_properties.c b/hybris/vulkan/compat/drm_properties.c
+new file mode 100644
+index 0000000..ee0fbe3
+--- /dev/null
++++ b/hybris/vulkan/compat/drm_properties.c
+@@ -0,0 +1,108 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++/* Rail contract: a VkPhysicalDeviceDrmPropertiesEXT in a properties2 chain is
++ * painted with a sentinel before the driver runs. If the sentinel survives the
++ * driver ignored the structure: the render node (stat, injected) fills
++ * hasRender/renderMajor/renderMinor and hasPrimary stays false. If it did not
++ * survive, the driver's answer passes through unchanged. With no node the
++ * application's own bytes are restored: absence is reported, never invented.
++ * The node is only stat'ed when the driver ignored the structure. The chain
++ * walk is bounded. One diagnostic line per outcome per process. Disable with
++ * HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES=0 (ignored in secure processes). */
++#define _GNU_SOURCE
++#define VK_NO_PROTOTYPES
++#include "drm_properties.h"
++#include <errno.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/auxv.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++
++/* The payload (two VkBool32 and four int64_t) follows sType/pNext and ends the
++ * structure. VkBool32 is 0 or 1, so a driver never writes it all 0xA5. */
++#define PAYLOAD offsetof(VkPhysicalDeviceDrmPropertiesEXT, hasPrimary)
++#define PAYLOAD_BYTES (sizeof(VkPhysicalDeviceDrmPropertiesEXT) - PAYLOAD)
++_Static_assert(offsetof(VkPhysicalDeviceDrmPropertiesEXT, renderMinor) + sizeof(int64_t) ==
++               sizeof(VkPhysicalDeviceDrmPropertiesEXT), "the payload ends the structure");
++enum { SENTINEL_BYTE = 0xA5, CHAIN_LIMIT = 64 };
++#define RENDER_NODE "/dev/dri/renderD128"
++
++static _Atomic unsigned reported;
++static pthread_once_t once = PTHREAD_ONCE_INIT;
++static int enabled = 1;
++static void configure(void)
++{
++    const char *value = getauxval(AT_SECURE) ? NULL : getenv("HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES");
++    enabled = !value || strcmp(value, "0");
++}
++
++struct hybris_drm_node hybris_drm_stat(const char *path)
++{
++    struct stat st;
++    if (!path) return (struct hybris_drm_node){.error = EINVAL};
++    if (stat(path, &st)) return (struct hybris_drm_node){.error = errno};
++    if (!S_ISCHR(st.st_mode)) return (struct hybris_drm_node){.error = ENOTSUP};
++    return (struct hybris_drm_node){.valid = 1, .major = major(st.st_rdev), .minor = minor(st.st_rdev)};
++}
++
++struct hybris_drm_node hybris_drm_render_node(void)
++{
++    pthread_once(&once, configure);
++    return enabled ? hybris_drm_stat(RENDER_NODE) : (struct hybris_drm_node){.error = ECANCELED};
++}
++
++static VkPhysicalDeviceDrmPropertiesEXT *find_drm(const VkPhysicalDeviceProperties2 *out)
++{
++    VkBaseOutStructure *node = out->pNext;
++    for (unsigned i = 0; node && i < CHAIN_LIMIT; ++i, node = node->pNext)
++        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT)
++            return (VkPhysicalDeviceDrmPropertiesEXT *)node;
++    return NULL;
++}
++
++static void report(enum hybris_drm_outcome outcome, const VkPhysicalDeviceProperties2 *out,
++                   const VkPhysicalDeviceDrmPropertiesEXT *drm, int error)
++{
++    static const char *const names[] = {"not-requested", "driver-answered", "filled", "no-node"};
++    unsigned bit = 1u << outcome;
++    if (atomic_fetch_or(&reported, bit) & bit) return;
++    fprintf(stderr, "HYBRIS_DRM_PROPERTIES outcome=%s vendor=0x%04x device=0x%08x driver=0x%08x "
++            "hasRender=%u render=%lld:%lld hasPrimary=%u primary=%lld:%lld error=%d\n",
++            names[outcome], out->properties.vendorID, out->properties.deviceID, out->properties.driverVersion,
++            drm->hasRender, (long long)drm->renderMajor, (long long)drm->renderMinor,
++            drm->hasPrimary, (long long)drm->primaryMajor, (long long)drm->primaryMinor, error);
++}
++
++enum hybris_drm_outcome hybris_drm_query(PFN_vkGetPhysicalDeviceProperties2 query,
++    VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, hybris_drm_node_fn render_node)
++{
++    VkPhysicalDeviceDrmPropertiesEXT *drm = find_drm(out);
++    if (!drm) { query(physical, out); return HYBRIS_DRM_NOT_REQUESTED; }
++    VkPhysicalDeviceDrmPropertiesEXT original = *drm, painted;
++    unsigned char *payload = (unsigned char *)drm + PAYLOAD;
++    memset(payload, SENTINEL_BYTE, PAYLOAD_BYTES);
++    painted = *drm;
++    query(physical, out);
++    enum hybris_drm_outcome outcome = HYBRIS_DRM_DRIVER_ANSWERED;
++    struct hybris_drm_node render = {0};
++    if (!memcmp(payload, (unsigned char *)&painted + PAYLOAD, PAYLOAD_BYTES)) {
++        render = render_node();
++        if (render.valid) {
++            drm->hasPrimary = VK_FALSE;
++            drm->primaryMajor = drm->primaryMinor = 0;
++            drm->hasRender = VK_TRUE;
++            drm->renderMajor = render.major;
++            drm->renderMinor = render.minor;
++            outcome = HYBRIS_DRM_FILLED;
++        } else {
++            memcpy(payload, (unsigned char *)&original + PAYLOAD, PAYLOAD_BYTES);
++            outcome = HYBRIS_DRM_NO_NODE;
++        }
++    }
++    report(outcome, out, drm, render.error);
++    return outcome;
++}
+diff --git a/hybris/vulkan/compat/drm_properties.h b/hybris/vulkan/compat/drm_properties.h
+new file mode 100644
+index 0000000..e38c83d
+--- /dev/null
++++ b/hybris/vulkan/compat/drm_properties.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#ifndef HYBRIS_DRM_PROPERTIES_H
++#define HYBRIS_DRM_PROPERTIES_H
++#include <vulkan/vulkan.h>
++#include <stdint.h>
++
++/* Render node of the GPU as stat(2) reported it. The zero value is the named
++ * default: no usable node. `error` is an errno value, meaningful only when !valid. */
++struct hybris_drm_node { int valid; int error; int64_t major, minor; };
++/* Supplies the node on demand, so the stat(2) only happens when it is needed. */
++typedef struct hybris_drm_node (*hybris_drm_node_fn)(void);
++
++enum hybris_drm_outcome {
++    HYBRIS_DRM_NOT_REQUESTED,   /* no VkPhysicalDeviceDrmPropertiesEXT in the chain */
++    HYBRIS_DRM_DRIVER_ANSWERED, /* the driver wrote the structure; passed through */
++    HYBRIS_DRM_FILLED,          /* driver left it untouched; render node filled from stat */
++    HYBRIS_DRM_NO_NODE,         /* driver left it untouched and no node: application bytes restored */
++};
++
++/* The only stat(2): a character device yields valid=1 with its major/minor. */
++struct hybris_drm_node hybris_drm_stat(const char *path);
++/* The PowerVR render node, or the named default (no node, error=ECANCELED)
++ * when HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES=0. */
++struct hybris_drm_node hybris_drm_render_node(void);
++/* Runs `query` (the next handler or the driver) around the sentinel protocol. */
++enum hybris_drm_outcome hybris_drm_query(PFN_vkGetPhysicalDeviceProperties2 query,
++    VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, hybris_drm_node_fn render_node);
++#endif
+diff --git a/hybris/vulkan/layer/physical.c b/hybris/vulkan/layer/physical.c
+index 29a295e..0d21695 100644
+--- a/hybris/vulkan/layer/physical.c
++++ b/hybris/vulkan/layer/physical.c
+@@ -6,6 +6,7 @@
+ #include "../compat/shader_policy.h"
+ #include "../compat/bc_policy.h"
+ #include "../compat/clip_distance.h"
++#include "../compat/drm_properties.h"
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -87,8 +88,27 @@ static VkResult VKAPI_CALL enumerate_device_extensions(VkPhysicalDevice physical
+     return properties && written < kept ? VK_INCOMPLETE : VK_SUCCESS;
+ }
+ 
++/* Outermost properties2 handler: a chained VkPhysicalDeviceDrmPropertiesEXT the
++ * driver ignored is filled from the render node. Everything else is the clip,
++ * shader and BC handlers' chain, unchanged. */
++static void properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out, const char *name)
++{
++    struct hybris_layer_physical context;
++    if (!hybris_layer_lookup_physical(physical, &context)) return;
++    PFN_vkGetPhysicalDeviceProperties2 query = (void *)hybris_clip_policy_proc(name);
++    if (!query) query = (void *)context.resolver(context.instance, name);
++    if (!query) return;
++    hybris_drm_query(query, physical, out, hybris_drm_render_node);
++}
++static void VKAPI_CALL properties2_core(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out)
++{ properties2(physical, out, "vkGetPhysicalDeviceProperties2"); }
++static void VKAPI_CALL properties2_khr(VkPhysicalDevice physical, VkPhysicalDeviceProperties2 *out)
++{ properties2(physical, out, "vkGetPhysicalDeviceProperties2KHR"); }
++
+ PFN_vkVoidFunction hybris_layer_physical_proc(const char *name)
+ {
++    if (!strcmp(name, "vkGetPhysicalDeviceProperties2")) return (PFN_vkVoidFunction)properties2_core;
++    if (!strcmp(name, "vkGetPhysicalDeviceProperties2KHR")) return (PFN_vkVoidFunction)properties2_khr;
+     PFN_vkVoidFunction function = hybris_clip_policy_proc(name);
+     if (!function) function = hybris_shader_policy_proc(name);
+     if (!function) function = hybris_bc_policy_proc(name);
