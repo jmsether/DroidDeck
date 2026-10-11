@@ -843,16 +843,16 @@ Rerun Step 4 (`python3 -m unittest tools.tests.test_hybris_compat -v`). Expected
 
 ### Task 9: `d3d` BC policy (`0003-bc-d3d-profile.patch`)
 
-Moves the policy table into a pure, Vulkan-free module `compat/bc_rules.{c,h}` and adds `HYBRIS_BC_TEXTURES=d3d` (policy 4): native-first selection of the 14 D3D formats, Vulkan 1.4 devices allowed and presented as 1.3 (as `dxvk` does), maintenance6 allowed, `textureCompressionBC` reported TRUE only when every one of the 14 formats has SAMPLED, FILTER_LINEAR, BLIT_SRC, TRANSFER_SRC and TRANSFER_DST natively or through emulation, and stripped before the driver sees it at `vkCreateDevice`. Policies 0–3 select exactly as before (proved by a 20,000-round equivalence test); `dxvk` now also reports the feature when complete. Diagnostics, once per process: `HYBRIS_BC policy=… emulated=0x… texture_compression=… gap_format=… lacking=0x…` and `HYBRIS_BC refused: <reason>`.
+Moves the policy table into a pure, Vulkan-free module `compat/bc_rules.{c,h}` and adds `HYBRIS_BC_TEXTURES=d3d` (policy 4): native-first selection of the 14 D3D formats, Vulkan 1.4 devices allowed and presented as 1.3 (as `dxvk` does), maintenance6 allowed, `textureCompressionBC` reported TRUE only when every one of the 14 formats has SAMPLED, FILTER_LINEAR, BLIT_SRC, TRANSFER_SRC and TRANSFER_DST natively or through emulation, and stripped before the driver sees it at `vkCreateDevice`. Policies 0–3 select exactly as before (proved by a 20,000-round equivalence test); `dxvk` now also reports the feature when complete. Diagnostics, once per process: `HYBRIS_BC policy=… emulated=0x… texture_compression=… gap_format=… lacking=0x…` and `HYBRIS_BC refused: <reason>`. The refusal that is expected under policies 1–2 on a Vulkan 1.4 device is not logged (it would print in every Vulkan process), so a line means something real: a Vulkan 1.0 application, storage limits, or a queue family. The patch also documents every `HYBRIS_BC_TEXTURES` value in the libhybris tree's `docs/compatibility-defaults.md`, and a properties query on a device that is not above Vulkan 1.3 no longer probes the driver.
 
 **Files:**
-- Create: `tools/tests/hybris_bc_rules_check.c` (Appendix D), `tools/tests/hybris_bc_policy_fake.c` (Appendix E)
+- Create: `tools/tests/hybris_bc_rules_check.c` (Appendix D), `tools/tests/hybris_bc_policy_fake.c` (Appendix E), `tools/tests/hybris_bc_device_create_test.c` (the block after Appendix E)
 - Modify: `tools/tests/test_hybris_compat.py`
 - Create: `tools/hybris/patches/0003-bc-d3d-profile.patch` (Appendix B)
 
 - [ ] **Step 1: Add the harnesses and their test methods**
 
-Copy Appendices D and E to `tools/tests/`. Add to `HybrisCompatTest`:
+Copy Appendices D and E and the device-create harness (the block after Appendix E) to `tools/tests/`. Add to `HybrisCompatTest`:
 ```python
     def test_bc_rules(self):
         program = self.build("bc-rules", [TESTS / "hybris_bc_rules_check.c", self.vulkan / "compat/bc_rules.c"])
@@ -864,7 +864,30 @@ Copy Appendices D and E to `tools/tests/`. Add to `HybrisCompatTest`:
         for policy in ("unset", "missing", "force", "dxvk", "d3d", "0"):
             with self.subTest(policy=policy):
                 env = {} if policy == "unset" else {"HYBRIS_BC_TEXTURES": policy}
-                self.assertIn("failures=0", self.run_program(program, policy, **env).stdout)
+                ran = self.run_program(program, policy, **env)
+                self.assertIn("failures=0", ran.stdout)
+                # A refusal is logged once per process, and the expected Vulkan 1.4 one under the default
+                # policies is not logged at all: the harness's first logged reason is the one it provokes.
+                refusals = [line for line in ran.stderr.splitlines() if line.startswith("HYBRIS_BC refused:")]
+                self.assertEqual(len(refusals), 0 if policy == "0" else 1, ran.stderr)
+                self.assertNotIn("Vulkan 1.4", "".join(refusals))
+                if policy in ("unset", "missing", "force"):
+                    self.assertIn("application requested Vulkan 1.0", "".join(refusals))
+
+    def test_device_create_strips_synthesized_texture_compression(self):
+        program = self.build("bc-device-create", [TESTS / "hybris_bc_device_create_test.c",
+                                                  self.vulkan / "layer/device_features.c"])
+        self.assertIn("failures=0", self.run_program(program).stdout)
+```
+Rename `test_layer_properties_handler_compiles` to `test_layer_handlers_compile` and make it compile the device-create filter too:
+```python
+    def test_layer_handlers_compile(self):
+        # The properties2 handler and the device-create filter are in the layer, which the harnesses link piecemeal.
+        layer = [self.vulkan / "layer/physical.c", self.vulkan / "layer/device_features.c"]
+        command = [self.compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-pthread", "-fsyntax-only",
+                   "-I", str(self.include), "-I", str(self.vulkan), *map(str, layer)]
+        checked = subprocess.run(command, capture_output=True, text=True, errors="replace")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 ```
 Also replace the characterization test's source list (it must cover the new module too):
 ```python
@@ -879,21 +902,21 @@ with:
 - [ ] **Step 2: Run and see them fail**
 
 WSL: `python3 -m unittest tools.tests.test_hybris_compat -v`
-Expected: `test_bc_rules` FAILs with `compat/bc_rules.h: No such file or directory`; `test_bc_policy_against_a_vulkan_1_4_driver` FAILs with a compile error (`implicit declaration of function hybris_bc_texture_compression` and `compat/bc_rules.c: No such file or directory`); the other two tests stay `ok`.
+Expected: `test_bc_rules` FAILs with `compat/bc_rules.h: No such file or directory`; `test_bc_policy_against_a_vulkan_1_4_driver` FAILs with a compile error (`implicit declaration of function hybris_bc_texture_compression` and `compat/bc_rules.c: No such file or directory`); `test_device_create_strips_synthesized_texture_compression` FAILs with `BC_DEVICE_CREATE checks=41 failures=12` and `FAIL …hybris_bc_device_create_test.c:…` lines (the tree has no texture-compression strip yet); the other four tests stay `ok`.
 
 - [ ] **Step 3: Add the patch (Appendix B)**
 
-Copy Appendix B verbatim to `tools/hybris/patches/0003-bc-d3d-profile.patch` (LF; it is generated against the tree with 0002 applied).
+Copy Appendix B verbatim to `tools/hybris/patches/0003-bc-d3d-profile.patch` (LF; it is generated against the tree with 0002 applied, and also adds the `HYBRIS_BC_TEXTURES` section to the tree's `docs/compatibility-defaults.md`).
 
 - [ ] **Step 4: Run again**
 
 WSL: `python3 -m unittest tools.tests.test_hybris_compat -v`
-Expected: all four tests `ok` (the captured harness output contains `BC_RULES_CHECK checks=60063 failures=0` and one `BC_POLICY_FAKE policy=<p> … failures=0` per policy; it is shown only when a test fails).
+Expected: all seven tests `ok` (the captured harness output contains `BC_RULES_CHECK checks=60063 failures=0`, `BC_DEVICE_CREATE checks=41 failures=0` and one `BC_POLICY_FAKE policy=<p> … failures=0` per policy; it is shown only when a test fails).
 
 - [ ] **Step 5: Standard checks, then commit**
 
 ```bash
-git add tools/hybris/patches/0003-bc-d3d-profile.patch tools/tests/hybris_bc_rules_check.c tools/tests/hybris_bc_policy_fake.c tools/tests/test_hybris_compat.py
+git add tools/hybris/patches/0003-bc-d3d-profile.patch tools/tests/hybris_bc_rules_check.c tools/tests/hybris_bc_policy_fake.c tools/tests/hybris_bc_device_create_test.c tools/tests/test_hybris_compat.py
 git commit -m "hybris: d3d BC policy reports textureCompressionBC when every D3D format is covered
 
 Decodes only what the driver cannot sample (BC6H and BC7 on PowerVR) so
@@ -1443,7 +1466,7 @@ Then use superpowers:writing-plans to write `docs/superpowers/plans/<date>-pixel
 
 Each appendix is the exact content of one file. Copy it verbatim (LF line endings, no trailing changes). They were verified on the host on 2026-10-10:
 - A + B apply in build order on the pin (`bc8cb358`) after `powervr-hal-version.patch` and `0001-dxvk-bc-profile.patch`.
-- C–E compile with `-Wall -Wextra -Werror` and pass against fake drivers (60,063 rule checks; every policy).
+- C–E and the device-create harness compile with `-Wall -Wextra -Werror` and pass against fake drivers (60,063 rule checks; 41 device-create checks; every policy).
 - F–J compile and pass against a fake PowerVR HAL.
 
 Nothing in them ran on a device.
@@ -1700,6 +1723,34 @@ index 29a295e..8304f4f 100644
 ### Appendix B: `tools/hybris/patches/0003-bc-d3d-profile.patch`
 
 ~~~~diff
+diff --git a/docs/compatibility-defaults.md b/docs/compatibility-defaults.md
+index 6ef4ef3..c7dee3c 100644
+--- a/docs/compatibility-defaults.md
++++ b/docs/compatibility-defaults.md
+@@ -35,6 +35,23 @@ Older dated audits and baseline reports describe the opt-in policy used for
+ those runs. Their results remain historical evidence, not tests of this
+ combined default configuration.
+ 
++## HYBRIS_BC_TEXTURES values
++
++The policy is read once per process; any text not listed here is the same as `0`.
++
++| Value | Behavior |
++| --- | --- |
++| unset, missing, 1 | Default. Emulates the BC formats the driver cannot sample. Not applied on Vulkan 1.4 devices, which are left native without a log line. |
++| force | Emulates every BC format, even those the driver samples natively. Not applied on Vulkan 1.4 devices. |
++| dxvk | Decodes all 14 Direct3D formats (every BC format except BC1 RGB), native or not. Allows Vulkan 1.4 devices and presents them as 1.3 while anything is emulated; allows maintenance6; reports textureCompressionBC when all 14 are covered. |
++| d3d | Native first: a Direct3D format the driver samples, filters linearly, blits from and copies to and from stays native, and the rest of the 14 are decoded. Allows and presents Vulkan 1.4 devices as 1.3 and allows maintenance6 like dxvk. Reports textureCompressionBC only when all 14 formats have those features natively or through emulation. |
++| 0 | Off. |
++
++Where dxvk or d3d reports textureCompressionBC and the driver does not, the
++feature is cleared before the driver sees vkCreateDevice. Once per process the
++layer logs `HYBRIS_BC policy=...` with the emulated-format mask, and the first
++reason emulation could not run as `HYBRIS_BC refused: ...`.
++
+ ## Combined-default smoke check (2026-09-20)
+ 
+ Built in Linux and tested on X300 with Debian/anlabwc, Zink and the Mali
 diff --git a/hybris/vulkan/Makefile.am b/hybris/vulkan/Makefile.am
 index 2fa943f..69e3cd1 100644
 --- a/hybris/vulkan/Makefile.am
@@ -1714,7 +1765,7 @@ index 2fa943f..69e3cd1 100644
      compat/drm_properties.c compat/drm_properties.h \
      compat/memory_visibility.c compat/memory_visibility.h compat/rendering_segments.c compat/rendering_segments.h \
 diff --git a/hybris/vulkan/compat/bc_policy.c b/hybris/vulkan/compat/bc_policy.c
-index 3124a25..2bd5bea 100644
+index 3124a25..0a4239d 100644
 --- a/hybris/vulkan/compat/bc_policy.c
 +++ b/hybris/vulkan/compat/bc_policy.c
 @@ -3,31 +3,38 @@
@@ -1765,7 +1816,7 @@ index 3124a25..2bd5bea 100644
  }
  #define PHYSICAL_PROC(name) PFN_vk##name name = (PFN_vk##name)context.resolver(context.instance, "vk" #name)
  /* Preserve three-channel border replacement when the native image format
-@@ -49,23 +56,37 @@ static unsigned physical_rgb_mask(VkPhysicalDevice physical)
+@@ -49,23 +56,38 @@ static unsigned physical_rgb_mask(VkPhysicalDevice physical)
      }
      return mask;
  }
@@ -1797,9 +1848,10 @@ index 3124a25..2bd5bea 100644
 -        properties.limits.maxStorageBufferRange < 256 ||
 -        properties.limits.minStorageBufferOffsetAlignment >= properties.limits.maxStorageBufferRange) return 0;
 +    /* Core 1.4 includes descriptor-state commands that are not intercepted yet;
-+     * only a profile that presents 1.3 and masks them may run on such a device. */
++     * only a profile that presents 1.3 and masks them may run on such a device.
++     * The other policies meet this in every Vulkan process: expected, so not logged. */
 +    if (properties.apiVersion < VK_API_VERSION_1_1) return refuse("device below Vulkan 1.1");
-+    if (!hybris_bc_api_allowed(traits(), properties.apiVersion)) return refuse("Vulkan 1.4 device needs the dxvk or d3d policy");
++    if (!hybris_bc_api_allowed(traits(), properties.apiVersion)) return 0;
 +    if (properties.limits.maxStorageBufferRange < 256 ||
 +        properties.limits.minStorageBufferOffsetAlignment >= properties.limits.maxStorageBufferRange)
 +        return refuse("storage buffer limits too small for the decoder");
@@ -1811,7 +1863,7 @@ index 3124a25..2bd5bea 100644
      GetPhysicalDeviceQueueFamilyProperties(physical, &count, queues);
      for (uint32_t i = 0; i < count; ++i) {
          if (!(queues[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT))) continue;
-@@ -74,31 +95,70 @@ unsigned hybris_bc_physical_mask(VkPhysicalDevice physical)
+@@ -74,31 +96,70 @@ unsigned hybris_bc_physical_mask(VkPhysicalDevice physical)
          if (!(queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) ||
              queues[i].minImageTransferGranularity.width != 1 ||
              queues[i].minImageTransferGranularity.height != 1 ||
@@ -1893,11 +1945,11 @@ index 3124a25..2bd5bea 100644
  static void cap_properties(VkPhysicalDevice physical, VkPhysicalDeviceProperties *out)
  {
 -    if (dxvk_profile() && hybris_bc_physical_mask(physical) && out->apiVersion > VK_API_VERSION_1_3)
-+    if (traits()->profile13 && hybris_bc_physical_mask(physical) && out->apiVersion > VK_API_VERSION_1_3)
++    if (traits()->profile13 && out->apiVersion > VK_API_VERSION_1_3 && hybris_bc_physical_mask(physical))
          out->apiVersion = VK_API_VERSION_1_3;
  }
  static void VKAPI_CALL properties(VkPhysicalDevice physical, VkPhysicalDeviceProperties *out)
-@@ -134,9 +194,8 @@ int hybris_bc_format_properties(VkPhysicalDevice physical, VkFormat format, VkFo
+@@ -134,9 +195,8 @@ int hybris_bc_format_properties(VkPhysicalDevice physical, VkFormat format, VkFo
      PHYSICAL_PROC(GetPhysicalDeviceFormatProperties);
      VkFormatProperties decoded;
      GetPhysicalDeviceFormatProperties(physical, hybris_bc_image_format(format, physical_rgb_mask(physical)), &decoded);
@@ -1909,7 +1961,7 @@ index 3124a25..2bd5bea 100644
      return 1;
  }
  int hybris_bc_extension_allowed(const char *name)
-@@ -150,7 +209,7 @@ int hybris_bc_extension_allowed(const char *name)
+@@ -150,7 +210,7 @@ int hybris_bc_extension_allowed(const char *name)
      };
      for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i)
          if (!strcmp(name, unsupported[i])) {
@@ -1918,7 +1970,7 @@ index 3124a25..2bd5bea 100644
              return 0;
          }
      return 1;
-@@ -162,9 +221,9 @@ static unsigned unsupported_feature_count(VkStructureType type)
+@@ -162,9 +222,9 @@ static unsigned unsupported_feature_count(VkStructureType type)
      switch (type) {
      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT: return 4;
      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES:
@@ -1930,7 +1982,7 @@ index 3124a25..2bd5bea 100644
      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PER_STAGE_DESCRIPTOR_SET_FEATURES_NV: return 2;
      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT:
      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT:
-@@ -180,10 +239,13 @@ static unsigned unsupported_feature_count(VkStructureType type)
+@@ -180,10 +240,13 @@ static unsigned unsupported_feature_count(VkStructureType type)
  }
  VkResult hybris_bc_prepare_device(VkPhysicalDevice physical, const VkDeviceCreateInfo *info)
  {
@@ -1946,7 +1998,7 @@ index 3124a25..2bd5bea 100644
      for (const VkBaseInStructure *node = info->pNext; node; node = node->pNext) {
          unsigned count = unsupported_feature_count(node->sType);
          for (unsigned i = 0; i < count; ++i) {
-@@ -195,7 +257,7 @@ VkResult hybris_bc_prepare_device(VkPhysicalDevice physical, const VkDeviceCreat
+@@ -195,7 +258,7 @@ VkResult hybris_bc_prepare_device(VkPhysicalDevice physical, const VkDeviceCreat
              ((const VkDeviceGroupDeviceCreateInfo *)node)->physicalDeviceCount != 1) return VK_ERROR_FEATURE_NOT_PRESENT;
          if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 &&
              (((const VkPhysicalDeviceFeatures2 *)node)->features.pipelineStatisticsQuery ||
@@ -1955,7 +2007,7 @@ index 3124a25..2bd5bea 100644
          if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES &&
              ((const VkPhysicalDeviceVulkan11Features *)node)->protectedMemory) return VK_ERROR_FEATURE_NOT_PRESENT;
          if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES &&
-@@ -241,13 +303,24 @@ static void VKAPI_CALL queue_properties2_core(VkPhysicalDevice physical, uint32_
+@@ -241,13 +304,24 @@ static void VKAPI_CALL queue_properties2_core(VkPhysicalDevice physical, uint32_
  { queue_properties2(physical, count, out, "vkGetPhysicalDeviceQueueFamilyProperties2"); }
  static void VKAPI_CALL queue_properties2_khr(VkPhysicalDevice physical, uint32_t *count, VkQueueFamilyProperties2 *out)
  { queue_properties2(physical, count, out, "vkGetPhysicalDeviceQueueFamilyProperties2KHR"); }
@@ -1981,7 +2033,7 @@ index 3124a25..2bd5bea 100644
  }
  static void features2(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2 *out, const char *name)
  {
-@@ -255,8 +328,7 @@ static void features2(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2 *out,
+@@ -255,8 +329,7 @@ static void features2(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2 *out,
      if (!hybris_layer_lookup_physical(physical, &context)) return;
      PFN_vkGetPhysicalDeviceFeatures2 query = (PFN_vkGetPhysicalDeviceFeatures2)context.resolver(context.instance, name);
      query(physical, out);
@@ -2775,7 +2827,8 @@ static unsigned checks, failures;
 /* The fake driver: Pixel 10 shape. BC1 RGB..BC5 native, BC6H/BC7 absent. */
 static VkFormatFeatureFlags bc_native[16], decoded_features;
 static VkFormatFeatureFlags rgba16f_features, rgba8_features;
-static uint32_t device_api;
+static uint32_t device_api, app_api;   /* the device's Vulkan version, and the one the application asked for */
+static unsigned queue_queries;          /* probes of the driver, counted at its first call */
 static VkBool32 native_texture_compression;
 static VkQueueFamilyProperties family;
 
@@ -2784,6 +2837,7 @@ static void reset_driver(void)
     for (unsigned i = 0; i < 16; ++i) bc_native[i] = i < 12 ? FULL : 0;
     rgba8_features = rgba16f_features = decoded_features = FULL | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     device_api = VK_MAKE_API_VERSION(0, 1, 4, 317);
+    app_api = VK_API_VERSION_1_3;
     native_texture_compression = VK_FALSE;
     family = (VkQueueFamilyProperties){.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
         VK_QUEUE_TRANSFER_BIT, .queueCount = 1, .minImageTransferGranularity = {1, 1, 1}};
@@ -2800,6 +2854,7 @@ static void fake_properties(VkPhysicalDevice p, VkPhysicalDeviceProperties *out)
 static void fake_queues(VkPhysicalDevice p, uint32_t *count, VkQueueFamilyProperties *out)
 {
     (void)p;
+    if (!out) ++queue_queries;
     if (out && *count) out[0] = family;
     *count = 1;
 }
@@ -2838,7 +2893,7 @@ int hybris_layer_lookup_physical(VkPhysicalDevice physical, struct hybris_layer_
 {
     (void)physical;
     *out = (struct hybris_layer_physical){.instance = (VkInstance)(uintptr_t)1, .generation = 1,
-        .api_version = VK_API_VERSION_1_3, .resolver = fake_resolver};
+        .api_version = app_api, .resolver = fake_resolver};
     return 1;
 }
 VkResult hybris_bc_device_add(VkDevice h, PFN_vkGetDeviceProcAddr r, const VkPhysicalDeviceMemoryProperties *m,
@@ -2902,18 +2957,27 @@ static void pixel10_d3d(unsigned expected_mask)   /* d3d and dxvk profiles on th
     family.queueFlags = VK_QUEUE_TRANSFER_BIT;
     CHECK(hybris_bc_physical_mask(physical) == 0 && reported_bc() == VK_FALSE && reported_api() == device_api);
 }
+static void properties_query_below_1_4(void)   /* nothing to cap, so nothing to probe */
+{
+    reset_driver();
+    device_api = VK_API_VERSION_1_3;
+    const unsigned probes = queue_queries;
+    CHECK(reported_api() == VK_API_VERSION_1_3 && queue_queries == probes);
+}
 static void check_policy(const char *name)
 {
     reset_driver();
     if (!strcmp(name, "d3d")) {
         CHECK(hybris_bc_enabled());
         pixel10_d3d(0xF000u);
+        properties_query_below_1_4();
         /* Natively sampleable but incomplete BC4: d3d decodes it, so the claim survives. */
         reset_driver();
         bc_native[8] = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
         CHECK(hybris_bc_physical_mask(physical) == 0xF100u && hybris_bc_texture_compression(physical) == 1);
     } else if (!strcmp(name, "dxvk")) {
         pixel10_d3d(0xFFFCu);
+        properties_query_below_1_4();
     } else if (!strcmp(name, "missing") || !strcmp(name, "unset") || !strcmp(name, "force")) {
         /* Unchanged behavior: Vulkan 1.4 stays excluded, and the feature is never raised. */
         CHECK(hybris_bc_enabled() && hybris_bc_physical_mask(physical) == 0);
@@ -2924,6 +2988,11 @@ static void check_policy(const char *name)
         CHECK(hybris_bc_physical_mask(physical) == want);
         CHECK(hybris_bc_texture_compression(physical) == 0 && reported_bc() == VK_FALSE);
         CHECK(create_with_bc() == VK_ERROR_FEATURE_NOT_PRESENT);
+        /* The Vulkan 1.4 exclusion above is expected and prints nothing; an application that asked for
+         * Vulkan 1.0 is the first refusal worth a line, and test_hybris_compat.py expects it exactly once
+         * on stderr however often the mask is asked for. */
+        app_api = VK_API_VERSION_1_0;
+        CHECK(hybris_bc_physical_mask(physical) == 0 && hybris_bc_physical_mask(physical) == 0);
     } else {
         CHECK(!hybris_bc_enabled() && hybris_bc_physical_mask(physical) == 0);
         CHECK(!hybris_bc_policy_proc("vkGetPhysicalDeviceFeatures2"));
@@ -2934,6 +3003,223 @@ int main(int argc, char **argv)
 {
     check_policy(argc > 1 ? argv[1] : "unset");
     printf("BC_POLICY_FAKE policy=%s checks=%u failures=%u\n", argc > 1 ? argv[1] : "unset", checks, failures);
+    return failures ? 1 : 0;
+}
+~~~~
+
+#### `tools/tests/hybris_bc_device_create_test.c`
+
+~~~~c
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Host check of layer/device_features.c: the layer reports textureCompressionBC without the driver having it, so
+ * vkCreateDevice must hand the driver a copy with the bit cleared and leave the application's structures alone.
+ * The policies are stubbed. Build (TREE is the prepared libhybris tree, VULKAN_INCLUDE the Vulkan headers):
+ *   cc -std=gnu11 -Wall -Wextra -Werror -I $VULKAN_INCLUDE -I $TREE/hybris/vulkan \
+ *      tools/tests/hybris_bc_device_create_test.c $TREE/hybris/vulkan/layer/device_features.c -o bc_device_create */
+#define VK_NO_PROTOTYPES
+#include "layer/device_features.h"
+#include "compat/bc_policy.h"
+#include "compat/clip_distance.h"
+#include "compat/vertex_stores.h"
+#include <vulkan/vk_layer.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static unsigned checks, failures;
+#define CHECK(condition) do { ++checks; if (!(condition)) { ++failures; \
+    fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #condition); } } while (0)
+
+static int strip;   /* what the BC policy answers: the layer reports the feature, the driver lacks it */
+int hybris_clip_active(VkPhysicalDevice physical) { (void)physical; return 0; }
+int hybris_vertex_stores_active(VkPhysicalDevice physical) { (void)physical; return 0; }
+int hybris_bc_strip_texture_compression(VkPhysicalDevice physical) { (void)physical; return strip; }
+
+/* Every allocation the layer makes goes through this, so a leak or a double free shows without a sanitizer. */
+static int live, allocations;
+static void *VKAPI_CALL counted_allocate(void *user, size_t size, size_t alignment, VkSystemAllocationScope scope)
+{ (void)user; (void)alignment; (void)scope; ++live; ++allocations; return malloc(size); }
+static void VKAPI_CALL counted_free(void *user, void *memory)
+{ (void)user; if (memory) { --live; free(memory); } }
+static const VkAllocationCallbacks allocator = {.pfnAllocation = counted_allocate, .pfnFree = counted_free};
+
+static const VkPhysicalDevice physical = (VkPhysicalDevice)(uintptr_t)8;
+static VkResult prepare(const VkDeviceCreateInfo *info, struct hybris_device_features *out)
+{
+    allocations = 0;
+    return hybris_device_features_prepare(physical, info, &allocator, out);
+}
+static void finish(struct hybris_device_features *out)
+{
+    hybris_device_features_release(out, &allocator);
+    CHECK(live == 0 && !out->copies);
+}
+
+static const char *const extension_names[] = {"VK_KHR_swapchain", "VK_KHR_maintenance5"};
+static const VkDeviceQueueCreateInfo queue = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+static VkDeviceCreateInfo device_info(const void *next, const VkPhysicalDeviceFeatures *enabled)
+{
+    return (VkDeviceCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = next, .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &queue, .enabledExtensionCount = 2, .ppEnabledExtensionNames = extension_names,
+        .pEnabledFeatures = enabled};
+}
+/* Everything in a VkDeviceCreateInfo except its two feature routes (pNext, pEnabledFeatures). */
+static int same_device_info(const VkDeviceCreateInfo *a, const VkDeviceCreateInfo *b)
+{
+    return a->sType == b->sType && a->flags == b->flags && a->queueCreateInfoCount == b->queueCreateInfoCount &&
+        a->pQueueCreateInfos == b->pQueueCreateInfos && a->enabledLayerCount == b->enabledLayerCount &&
+        a->ppEnabledLayerNames == b->ppEnabledLayerNames && a->enabledExtensionCount == b->enabledExtensionCount &&
+        a->ppEnabledExtensionNames == b->ppEnabledExtensionNames;
+}
+/* All 55 features on: any bit the layer touches besides textureCompressionBC shows as a change. */
+static VkPhysicalDeviceFeatures all_features(void)
+{
+    VkPhysicalDeviceFeatures features;
+    const VkBool32 on = VK_TRUE;
+    for (unsigned i = 0; i < sizeof features / sizeof on; ++i) memcpy((char *)&features + i * sizeof on, &on, sizeof on);
+    return features;
+}
+static int equals_but_bc(const VkPhysicalDeviceFeatures *seen, const VkPhysicalDeviceFeatures *app)
+{
+    VkPhysicalDeviceFeatures expected = *app;
+    expected.textureCompressionBC = VK_FALSE;
+    return !memcmp(seen, &expected, sizeof expected);
+}
+static unsigned sequence(const void *head, VkStructureType *types, unsigned capacity)
+{
+    unsigned count = 0;
+    for (const VkBaseInStructure *node = head; node && count < capacity; node = node->pNext) types[count++] = node->sType;
+    return count;
+}
+static const VkBaseInStructure *find(const void *head, VkStructureType type)
+{
+    const VkBaseInStructure *node = head;
+    while (node && node->sType != type) node = node->pNext;
+    return node;
+}
+
+/* (a) pEnabledFeatures: the driver gets a copy without the bit; the application's structure is untouched. */
+static void enabled_features(void)
+{
+    VkPhysicalDeviceFeatures app = all_features(), before = app;
+    VkDeviceCreateInfo info = device_info(NULL, &app);
+    struct hybris_device_features out;
+    strip = 1;
+    CHECK(prepare(&info, &out) == VK_SUCCESS);
+    CHECK(out.info.pEnabledFeatures && out.info.pEnabledFeatures != &app);
+    CHECK(out.info.pEnabledFeatures && equals_but_bc(out.info.pEnabledFeatures, &before));
+    CHECK(!memcmp(&app, &before, sizeof app) && app.textureCompressionBC == VK_TRUE);
+    CHECK(same_device_info(&out.info, &info) && out.info.pNext == info.pNext && !out.copies && allocations == 0);
+    finish(&out);
+}
+
+/* (b) Features2 in DXVK's shape: Vulkan 1.1/1.2/1.3 and maintenance5/6 feature structs follow it. The
+ * layer copies the prefix up to Features2 and links the application's own nodes after the copy. */
+struct dxvk_chain {
+    VkLayerDeviceCreateInfo loader;
+    VkPhysicalDeviceFeatures2 features2;
+    VkPhysicalDeviceVulkan11Features v11;
+    VkPhysicalDeviceVulkan12Features v12;
+    VkPhysicalDeviceVulkan13Features v13;
+    VkPhysicalDeviceMaintenance5Features maintenance5;
+    VkPhysicalDeviceMaintenance6Features maintenance6;
+};
+static const VkBaseInStructure *dxvk_chain(struct dxvk_chain *c, int with_loader)
+{
+    *c = (struct dxvk_chain){
+        .loader = {.sType = VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO, .function = VK_LOADER_DATA_CALLBACK, .pNext = &c->features2},
+        .features2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &c->v11, .features = all_features()},
+        .v11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &c->v12, .multiview = VK_TRUE},
+        .v12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &c->v13, .bufferDeviceAddress = VK_TRUE},
+        .v13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = &c->maintenance5, .dynamicRendering = VK_TRUE},
+        .maintenance5 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES, .pNext = &c->maintenance6, .maintenance5 = VK_TRUE},
+        .maintenance6 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES, .maintenance6 = VK_TRUE},
+    };
+    return with_loader ? (const VkBaseInStructure *)&c->loader : (const VkBaseInStructure *)&c->features2;
+}
+static void features2_chain(int with_loader)
+{
+    struct dxvk_chain app, before;
+    VkStructureType want[8], got[8];
+    VkDeviceCreateInfo info = device_info(dxvk_chain(&app, with_loader), NULL);
+    memcpy(&before, &app, sizeof app);
+    unsigned count = sequence(info.pNext, want, 8);
+    struct hybris_device_features out;
+    strip = 1;
+    CHECK(prepare(&info, &out) == VK_SUCCESS);
+    CHECK(count == (with_loader ? 7u : 6u) && sequence(out.info.pNext, got, 8) == count && !memcmp(got, want, count * sizeof *got));
+    const VkPhysicalDeviceFeatures2 *copy = (const void *)find(out.info.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
+    CHECK(copy && copy != &app.features2 && equals_but_bc(&copy->features, &before.features2.features));
+    CHECK(copy && copy->pNext == (const void *)&app.v11 && out.suffix == &app.v11);   /* the suffix is shared, not copied */
+    CHECK(allocations == (with_loader ? 2 : 1) && !out.info.pEnabledFeatures && same_device_info(&out.info, &info));
+    if (with_loader) {
+        VkLayerDeviceCreateInfo loader;
+        memcpy(&loader, out.info.pNext, sizeof loader);
+        CHECK(out.info.pNext != (const void *)&app.loader && loader.pNext == (const void *)copy);
+        loader.pNext = app.loader.pNext;
+        CHECK(!memcmp(&loader, &app.loader, sizeof loader));
+    } else CHECK(out.info.pNext == (const void *)copy);
+    CHECK(!memcmp(&app, &before, sizeof app) && app.features2.features.textureCompressionBC == VK_TRUE);
+    finish(&out);
+    CHECK(!memcmp(&app, &before, sizeof app));
+}
+
+/* (c) Nothing to strip: the driver sees the application's own pointers, with no copy made. */
+static void nothing_to_strip(void)
+{
+    struct dxvk_chain app;
+    VkPhysicalDeviceFeatures enabled = all_features();
+    struct hybris_device_features out;
+    VkDeviceCreateInfo features2 = device_info(dxvk_chain(&app, 1), NULL), plain = device_info(NULL, &enabled);
+    strip = 0;   /* the driver reports the feature itself */
+    CHECK(prepare(&features2, &out) == VK_SUCCESS && out.info.pNext == features2.pNext && !out.copies && allocations == 0);
+    CHECK(same_device_info(&out.info, &features2) && out.info.pEnabledFeatures == NULL);
+    finish(&out);
+    CHECK(prepare(&plain, &out) == VK_SUCCESS && out.info.pEnabledFeatures == &enabled && out.info.pNext == NULL && allocations == 0);
+    finish(&out);
+    strip = 1;   /* stripping is on, but the application never asked for the feature */
+    app.features2.features.textureCompressionBC = VK_FALSE;
+    enabled.textureCompressionBC = VK_FALSE;
+    CHECK(prepare(&features2, &out) == VK_SUCCESS && out.info.pNext == features2.pNext && !out.copies && allocations == 0);
+    finish(&out);
+    /* pEnabledFeatures is always copied while stripping is on; the copy equals the application's. */
+    CHECK(prepare(&plain, &out) == VK_SUCCESS && out.info.pEnabledFeatures && !memcmp(out.info.pEnabledFeatures, &enabled, sizeof enabled));
+    CHECK(out.info.pNext == NULL && allocations == 0);
+    finish(&out);
+}
+
+/* (d) Existing behavior, pinned: a node with a payload size the layer does not know in front of Features2 fails
+ * the create and frees what was copied so far; behind Features2 it is never read, so it passes through. */
+static void unknown_structure(void)
+{
+    struct dxvk_chain app;
+    VkBaseInStructure unknown = {.sType = (VkStructureType)0x7ffffff0u};
+    struct hybris_device_features out;
+    VkDeviceCreateInfo info = device_info(dxvk_chain(&app, 1), NULL);
+    strip = 1;
+    app.loader.pNext = &unknown;
+    unknown.pNext = (const void *)&app.features2;
+    CHECK(prepare(&info, &out) == VK_ERROR_EXTENSION_NOT_PRESENT);
+    CHECK(allocations == 1 && live == 0 && !out.copies);
+    finish(&out);
+
+    unknown.pNext = NULL;
+    app.loader.pNext = &app.features2;
+    app.maintenance6.pNext = &unknown;
+    CHECK(prepare(&info, &out) == VK_SUCCESS && out.suffix == &app.v11 && allocations == 2);
+    const VkBaseInStructure *tail = find(out.info.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES);
+    CHECK(tail == (const void *)&app.maintenance6 && app.maintenance6.pNext == &unknown);
+    finish(&out);
+}
+
+int main(void)
+{
+    enabled_features();
+    features2_chain(1);
+    features2_chain(0);
+    nothing_to_strip();
+    unknown_structure();
+    printf("BC_DEVICE_CREATE checks=%u failures=%u\n", checks, failures);
     return failures ? 1 : 0;
 }
 ~~~~

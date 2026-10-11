@@ -89,10 +89,11 @@ class HybrisCompatTest(unittest.TestCase):
         self.run_program(program)
         self.run_program(program, HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES="0", EXPECT_DISABLED="1")
 
-    def test_layer_properties_handler_compiles(self):
-        # The properties2 handler is in the layer, which the DRM harness does not build.
+    def test_layer_handlers_compile(self):
+        # The properties2 handler and the device-create filter are in the layer, which the harnesses link piecemeal.
+        layer = [self.vulkan / "layer/physical.c", self.vulkan / "layer/device_features.c"]
         command = [self.compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-pthread", "-fsyntax-only",
-                   "-I", str(self.include), "-I", str(self.vulkan), str(self.vulkan / "layer/physical.c")]
+                   "-I", str(self.include), "-I", str(self.vulkan), *map(str, layer)]
         checked = subprocess.run(command, capture_output=True, text=True, errors="replace")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
@@ -111,7 +112,20 @@ class HybrisCompatTest(unittest.TestCase):
         for policy in ("unset", "missing", "force", "dxvk", "d3d", "0"):
             with self.subTest(policy=policy):
                 env = {} if policy == "unset" else {"HYBRIS_BC_TEXTURES": policy}
-                self.assertIn("failures=0", self.run_program(program, policy, **env).stdout)
+                ran = self.run_program(program, policy, **env)
+                self.assertIn("failures=0", ran.stdout)
+                # A refusal is logged once per process, and the expected Vulkan 1.4 one under the default
+                # policies is not logged at all: the harness's first logged reason is the one it provokes.
+                refusals = [line for line in ran.stderr.splitlines() if line.startswith("HYBRIS_BC refused:")]
+                self.assertEqual(len(refusals), 0 if policy == "0" else 1, ran.stderr)
+                self.assertNotIn("Vulkan 1.4", "".join(refusals))
+                if policy in ("unset", "missing", "force"):
+                    self.assertIn("application requested Vulkan 1.0", "".join(refusals))
+
+    def test_device_create_strips_synthesized_texture_compression(self):
+        program = self.build("bc-device-create", [TESTS / "hybris_bc_device_create_test.c",
+                                                  self.vulkan / "layer/device_features.c"])
+        self.assertIn("failures=0", self.run_program(program).stdout)
 
 
 if __name__ == "__main__":

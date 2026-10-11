@@ -22,7 +22,8 @@ static unsigned checks, failures;
 /* The fake driver: Pixel 10 shape. BC1 RGB..BC5 native, BC6H/BC7 absent. */
 static VkFormatFeatureFlags bc_native[16], decoded_features;
 static VkFormatFeatureFlags rgba16f_features, rgba8_features;
-static uint32_t device_api;
+static uint32_t device_api, app_api;   /* the device's Vulkan version, and the one the application asked for */
+static unsigned queue_queries;          /* probes of the driver, counted at its first call */
 static VkBool32 native_texture_compression;
 static VkQueueFamilyProperties family;
 
@@ -31,6 +32,7 @@ static void reset_driver(void)
     for (unsigned i = 0; i < 16; ++i) bc_native[i] = i < 12 ? FULL : 0;
     rgba8_features = rgba16f_features = decoded_features = FULL | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     device_api = VK_MAKE_API_VERSION(0, 1, 4, 317);
+    app_api = VK_API_VERSION_1_3;
     native_texture_compression = VK_FALSE;
     family = (VkQueueFamilyProperties){.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
         VK_QUEUE_TRANSFER_BIT, .queueCount = 1, .minImageTransferGranularity = {1, 1, 1}};
@@ -47,6 +49,7 @@ static void fake_properties(VkPhysicalDevice p, VkPhysicalDeviceProperties *out)
 static void fake_queues(VkPhysicalDevice p, uint32_t *count, VkQueueFamilyProperties *out)
 {
     (void)p;
+    if (!out) ++queue_queries;
     if (out && *count) out[0] = family;
     *count = 1;
 }
@@ -85,7 +88,7 @@ int hybris_layer_lookup_physical(VkPhysicalDevice physical, struct hybris_layer_
 {
     (void)physical;
     *out = (struct hybris_layer_physical){.instance = (VkInstance)(uintptr_t)1, .generation = 1,
-        .api_version = VK_API_VERSION_1_3, .resolver = fake_resolver};
+        .api_version = app_api, .resolver = fake_resolver};
     return 1;
 }
 VkResult hybris_bc_device_add(VkDevice h, PFN_vkGetDeviceProcAddr r, const VkPhysicalDeviceMemoryProperties *m,
@@ -149,18 +152,27 @@ static void pixel10_d3d(unsigned expected_mask)   /* d3d and dxvk profiles on th
     family.queueFlags = VK_QUEUE_TRANSFER_BIT;
     CHECK(hybris_bc_physical_mask(physical) == 0 && reported_bc() == VK_FALSE && reported_api() == device_api);
 }
+static void properties_query_below_1_4(void)   /* nothing to cap, so nothing to probe */
+{
+    reset_driver();
+    device_api = VK_API_VERSION_1_3;
+    const unsigned probes = queue_queries;
+    CHECK(reported_api() == VK_API_VERSION_1_3 && queue_queries == probes);
+}
 static void check_policy(const char *name)
 {
     reset_driver();
     if (!strcmp(name, "d3d")) {
         CHECK(hybris_bc_enabled());
         pixel10_d3d(0xF000u);
+        properties_query_below_1_4();
         /* Natively sampleable but incomplete BC4: d3d decodes it, so the claim survives. */
         reset_driver();
         bc_native[8] = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
         CHECK(hybris_bc_physical_mask(physical) == 0xF100u && hybris_bc_texture_compression(physical) == 1);
     } else if (!strcmp(name, "dxvk")) {
         pixel10_d3d(0xFFFCu);
+        properties_query_below_1_4();
     } else if (!strcmp(name, "missing") || !strcmp(name, "unset") || !strcmp(name, "force")) {
         /* Unchanged behavior: Vulkan 1.4 stays excluded, and the feature is never raised. */
         CHECK(hybris_bc_enabled() && hybris_bc_physical_mask(physical) == 0);
@@ -171,6 +183,11 @@ static void check_policy(const char *name)
         CHECK(hybris_bc_physical_mask(physical) == want);
         CHECK(hybris_bc_texture_compression(physical) == 0 && reported_bc() == VK_FALSE);
         CHECK(create_with_bc() == VK_ERROR_FEATURE_NOT_PRESENT);
+        /* The Vulkan 1.4 exclusion above is expected and prints nothing; an application that asked for
+         * Vulkan 1.0 is the first refusal worth a line, and test_hybris_compat.py expects it exactly once
+         * on stderr however often the mask is asked for. */
+        app_api = VK_API_VERSION_1_0;
+        CHECK(hybris_bc_physical_mask(physical) == 0 && hybris_bc_physical_mask(physical) == 0);
     } else {
         CHECK(!hybris_bc_enabled() && hybris_bc_physical_mask(physical) == 0);
         CHECK(!hybris_bc_policy_proc("vkGetPhysicalDeviceFeatures2"));
