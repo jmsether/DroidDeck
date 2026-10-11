@@ -6,6 +6,37 @@ Facts here are measured on the device; anything inferred says so.
 
 ---
 
+## 2026-10-11 - M1 reached; first games: presentation, memory, first gameplay
+
+Build: `DroidDeck-0.3.2-d6e6ec4.apk` (debuggable fork build). Device as in Phase 0. Raw output:
+`pixel10-runs/20261011T080509Z/` (Steam UI), `20261011T081241Z/` (Balatro), `20261011T083550Z/` (Darksiders,
+Standard), `20261011T091232Z/` (Darksiders, Experimental), `20261011T093225Z/` (Darksiders, Standard plus the
+WSI layer, with `steam-462780.log`), `m2-darksiders/` (screenshot, memory monitor).
+
+M1: Steam Big Picture starts and responds (`droiddeck-drm:` fallback line present, no import failures).
+It is slow: the compositor receives 7-12 frames per second from gamescope (`[stats]` lines), while compositing
+itself takes about 2.5 ms a frame. Steam runs with software CEF compositing on this GPU.
+
+Games under the Standard graphics profile cannot present:
+- Balatro (OpenGL, Zink kopper): black screen, `MESA: error: zink: could not create swapchain`.
+- Darksiders Warmastered Edition: the same Zink line from a pre-game Wine process, then the game exits.
+- Cause (code reading, confirmed by the next two runs): games draw on gamescope's Xwayland; the hybris ICD
+  creates X11 surfaces only on servers with the TAWC-DRI extension, which stock Xwayland lacks, and Standard
+  loads no X11 WSI layer. The Steam client avoids Vulkan surfaces (DRI3); games get no such route.
+
+Darksiders with the Experimental profile (X11 WSI layer, pack DXVK, `HYBRIS_BC policy=3 emulated=0xfffc`):
+intro and title render (screenshot `m2-darksiders/title.png`), then a level load stalls for 10+ minutes. The
+game held 3.9 GB of GPU memory (`dumpsys gpu --gpumem`), the phone had about 200 MB available and its 7.8 GB
+zram swap was full. Decoding every BC format to RGBA8 is the inferred multiplier.
+
+Darksiders with Standard plus a per-game WSI layer entry (`HYBRIS_BC policy=4`, BC1-BC5 native): reaches
+gameplay. GPU memory 1.46 GB, 2.3-3.0 GB available, swap fine. Compositor: 50-60 fps in menus and cutscenes,
+5-10 fps in gameplay. Thermal status 3 (severe) throughout; one sample had the 3.05 GHz cores at 1.27 GHz.
+The on-screen touch controls do not reach the game. The game uses its own Vulkan renderer here (not DXVK)
+and logs `couldn't create occlusion query pool`.
+
+---
+
 ## 2026-10-11 - Baseline session: Steam's first window kills the session
 
 Build: `DroidDeck-0.3.2-aea026c.apk` (before this port's changes). Device as in Phase 0.
