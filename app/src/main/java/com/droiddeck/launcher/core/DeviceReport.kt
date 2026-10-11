@@ -8,6 +8,7 @@ import android.os.StatFs
 import android.util.Log
 import com.droiddeck.launcher.gpu.LinuxVulkanDriver
 import com.droiddeck.launcher.gpu.LinuxVulkanDriverManager
+import com.droiddeck.launcher.gpu.SystemVulkanDriver
 import com.droiddeck.launcher.gpu.TurnipDriver
 import com.droiddeck.launcher.runtime.DesktopCatalog
 import com.droiddeck.launcher.runtime.LinuxRuntime
@@ -103,7 +104,11 @@ object DeviceReport {
         h("GPU")
         k("KGSL gpu_model", readSys("/sys/class/kgsl/kgsl-3d0/gpu_model"))
         k("KGSL chip id", readSys("/sys/class/kgsl/kgsl-3d0/gpu_chipid"))
-        k("System Vulkan ICD", if (File("/vendor/lib64/hw/vulkan.adreno.so").exists()) "/vendor/lib64/hw/vulkan.adreno.so" else "not at the usual path")
+        k("System Vulkan ICD", when {
+            File("/vendor/lib64/hw/vulkan.adreno.so").exists() -> "/vendor/lib64/hw/vulkan.adreno.so"
+            SystemVulkanDriver.isPowerVr() -> SystemVulkanDriver.HAL
+            else -> "not at the usual path"
+        })
 
         h("Display")
         k("Session output", SessionState.outputSize?.let { "${it.first}x${it.second}" })
@@ -137,6 +142,13 @@ object DeviceReport {
             k("Linux driver", label)
         }
         k("Runtime's own ICD", LinuxRuntime.vulkanIcd(context)?.path)
+
+        if (gpu.powerVr) {
+            h("PowerVR")
+            // query() blocks on first use; this report is written on the session-start worker.
+            powerVrRows(com.droiddeck.launcher.gpu.VulkanInfo.query(), File(SystemVulkanDriver.HAL).length())
+                .forEach { (key, value) -> k(key, value) }
+        }
 
         h("Runtime")
         k("Installed version", LinuxRuntimeInstaller.installedVersion(context))
@@ -197,6 +209,18 @@ object DeviceReport {
         b.append("id, no account name, no network names. Safe to attach to a bug report as it is.\n")
         return b.toString()
     }
+
+    /** The PowerVR block's rows. Keys stay under k()'s 24 columns; absent facts read "unknown". */
+    internal fun powerVrRows(vk: Map<String, String>, halBytes: Long): List<Pair<String, String>> = listOf(
+        "System driver" to "${SystemVulkanDriver.HAL} ($halBytes bytes)",
+        "Vulkan device" to listOfNotNull(vk["device"], vk["api"]?.let { "API $it" }).joinToString(" · ").ifEmpty { "unknown" },
+        "Driver" to listOfNotNull(vk["driver_name"], vk["driver_info"]).joinToString(" ").ifEmpty { "unknown" },
+        // The phone's own answer through Android's loader; the compat layer's answer is in session.log.
+        "Driver BC feature" to (vk["texture_bc"] ?: "unknown"),
+        "Game defaults" to GameEnvironment.POWERVR.entries.joinToString(" ") { (name, value) ->
+            if (value == null) "-$name" else "$name=$value" },
+        "Compat layer" to "session.log: HYBRIS_DRM_PROPERTIES and HYBRIS_BC lines",
+    )
 
     private fun readSys(path: String): String? = FileUtils.readString(File(path))?.trim()?.ifEmpty { null }
 }
