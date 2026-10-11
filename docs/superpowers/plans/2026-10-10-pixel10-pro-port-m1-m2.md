@@ -902,7 +902,7 @@ with:
 - [ ] **Step 2: Run and see them fail**
 
 WSL: `python3 -m unittest tools.tests.test_hybris_compat -v`
-Expected: `test_bc_rules` FAILs with `compat/bc_rules.h: No such file or directory`; `test_bc_policy_against_a_vulkan_1_4_driver` FAILs with a compile error (`implicit declaration of function hybris_bc_texture_compression` and `compat/bc_rules.c: No such file or directory`); `test_device_create_strips_synthesized_texture_compression` FAILs with `BC_DEVICE_CREATE checks=41 failures=12` and `FAIL …hybris_bc_device_create_test.c:…` lines (the tree has no texture-compression strip yet); the other four tests stay `ok`.
+Expected: `test_bc_rules` FAILs with `compat/bc_rules.h: No such file or directory`; `test_bc_policy_against_a_vulkan_1_4_driver` FAILs with a compile error (`implicit declaration of function hybris_bc_texture_compression` and `compat/bc_rules.c: No such file or directory`); `test_device_create_strips_synthesized_texture_compression` FAILs with `BC_DEVICE_CREATE checks=62 failures=12` and `FAIL …hybris_bc_device_create_test.c:…` lines (the tree has no texture-compression strip yet); the other four tests stay `ok`.
 
 - [ ] **Step 3: Add the patch (Appendix B)**
 
@@ -911,7 +911,7 @@ Copy Appendix B verbatim to `tools/hybris/patches/0003-bc-d3d-profile.patch` (LF
 - [ ] **Step 4: Run again**
 
 WSL: `python3 -m unittest tools.tests.test_hybris_compat -v`
-Expected: all seven tests `ok` (the captured harness output contains `BC_RULES_CHECK checks=60063 failures=0`, `BC_DEVICE_CREATE checks=41 failures=0` and one `BC_POLICY_FAKE policy=<p> … failures=0` per policy; it is shown only when a test fails).
+Expected: all seven tests `ok` (the captured harness output contains `BC_RULES_CHECK checks=60063 failures=0`, `BC_DEVICE_CREATE checks=62 failures=0` and one `BC_POLICY_FAKE policy=<p> … failures=0` per policy; it is shown only when a test fails).
 
 - [ ] **Step 5: Standard checks, then commit**
 
@@ -1466,7 +1466,7 @@ Then use superpowers:writing-plans to write `docs/superpowers/plans/<date>-pixel
 
 Each appendix is the exact content of one file. Copy it verbatim (LF line endings, no trailing changes). They were verified on the host on 2026-10-10:
 - A + B apply in build order on the pin (`bc8cb358`) after `powervr-hal-version.patch` and `0001-dxvk-bc-profile.patch`.
-- C–E and the device-create harness compile with `-Wall -Wextra -Werror` and pass against fake drivers (60,063 rule checks; 41 device-create checks; every policy).
+- C–E and the device-create harness compile with `-Wall -Wextra -Werror` and pass against fake drivers (60,063 rule checks; 62 device-create checks; every policy).
 - F–J compile and pass against a fake PowerVR HAL.
 
 Nothing in them ran on a device.
@@ -3030,9 +3030,11 @@ static unsigned checks, failures;
 #define CHECK(condition) do { ++checks; if (!(condition)) { ++failures; \
     fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #condition); } } while (0)
 
-static int strip;   /* what the BC policy answers: the layer reports the feature, the driver lacks it */
-int hybris_clip_active(VkPhysicalDevice physical) { (void)physical; return 0; }
-int hybris_vertex_stores_active(VkPhysicalDevice physical) { (void)physical; return 0; }
+/* What the policies answer. strip: the layer reports textureCompressionBC and the driver lacks it. clip and
+ * stores: the other two filters that copy the create info (off unless a case switches them on). */
+static int strip, clip, stores;
+int hybris_clip_active(VkPhysicalDevice physical) { (void)physical; return clip; }
+int hybris_vertex_stores_active(VkPhysicalDevice physical) { (void)physical; return stores; }
 int hybris_bc_strip_texture_compression(VkPhysicalDevice physical) { (void)physical; return strip; }
 
 /* Every allocation the layer makes goes through this, so a leak or a double free shows without a sanitizer. */
@@ -3212,6 +3214,35 @@ static void unknown_structure(void)
     finish(&out);
 }
 
+/* (e) The copy another filter makes must not take the bit along: when the driver has textureCompressionBC itself
+ * (strip off), the application's request reaches the driver while that filter's own bits are cleared. */
+static void bc_survives_the_other_filters(void)
+{
+    strip = 0;
+    for (unsigned mode = 1; mode <= 3; ++mode) {   /* clip alone, stores alone, both */
+        clip = mode & 1;
+        stores = mode >> 1;
+        VkPhysicalDeviceFeatures app = all_features(), before = app, want = app;
+        if (clip) want.shaderClipDistance = VK_FALSE;
+        if (stores) want.vertexPipelineStoresAndAtomics = VK_FALSE;
+        struct hybris_device_features out;
+        VkDeviceCreateInfo plain = device_info(NULL, &app);
+        CHECK(prepare(&plain, &out) == VK_SUCCESS && out.info.pEnabledFeatures && out.info.pEnabledFeatures != &app);
+        CHECK(out.info.pEnabledFeatures && !memcmp(out.info.pEnabledFeatures, &want, sizeof want) && !memcmp(&app, &before, sizeof app));
+        finish(&out);
+
+        struct dxvk_chain chain, chain_before;
+        VkDeviceCreateInfo features2 = device_info(dxvk_chain(&chain, 1), NULL);
+        memcpy(&chain_before, &chain, sizeof chain);
+        CHECK(prepare(&features2, &out) == VK_SUCCESS && allocations == 2);
+        const VkPhysicalDeviceFeatures2 *copy = (const void *)find(out.info.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
+        CHECK(copy && copy != &chain.features2 && !memcmp(&copy->features, &want, sizeof want) && out.suffix == &chain.v11);
+        CHECK(!memcmp(&chain, &chain_before, sizeof chain));
+        finish(&out);
+    }
+    clip = stores = 0;
+}
+
 int main(void)
 {
     enabled_features();
@@ -3219,6 +3250,7 @@ int main(void)
     features2_chain(0);
     nothing_to_strip();
     unknown_structure();
+    bc_survives_the_other_filters();
     printf("BC_DEVICE_CREATE checks=%u failures=%u\n", checks, failures);
     return failures ? 1 : 0;
 }
