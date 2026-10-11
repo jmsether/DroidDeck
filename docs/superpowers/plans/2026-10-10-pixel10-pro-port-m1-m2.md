@@ -18,7 +18,7 @@
 
 - Repository: `E:\projects\PixelDroidDeck`, branch `pixel10`. Shell commands are Git Bash unless marked **PowerShell**; WSL commands run in `Ubuntu-24.04` at `/mnt/e/projects/PixelDroidDeck`.
 - After Task 1 the working tree is LF (`core.autocrlf=input`). New files must be LF.
-- Commit messages end with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never open a pull request on the fork: `.github/workflows/build.yml` "Check co-authors" fails PRs carrying that trailer. Builds use `workflow_dispatch`.
+- Commit messages end with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never open a pull request on the fork: `.github/workflows/build.yml` "Check co-authors" fails PRs carrying that trailer. Builds run on pushes to `pixel10` (Task 4 Step 3 explains why not `workflow_dispatch`).
 - Narrow checks:
   - JVM (PowerShell): `.\gradlew.bat -PskipRust=true :app:testDebugUnitTest --tests "<class>"`
   - Python/C (WSL): `VULKAN_INCLUDE=$HOME/.cache/droiddeck/vulkan-headers/include python3 -m unittest tools.tests.<module> -v` (the C-backed tests need Vulkan headers; WSL has neither the NDK nor libvulkan-dev, so Task 5 Step 5 keeps pinned headers in `$HOME/.cache/droiddeck/vulkan-headers`)
@@ -304,9 +304,9 @@ git push -u fork pixel10
 ```
 Pushing first keeps the path-filtered side workflows (gamescope, desktop-kde, box64, game-graphics, aaudio-sink) from firing on this push.
 
-- [ ] **Step 3: User enables Actions**
+- [ ] **Step 3: Disable the side workflows**
 
-The user opens https://github.com/jmsether/DroidDeck/actions and clicks "I understand my workflows, go ahead and enable them". Then disable the side workflows:
+On 2026-10-10 the new fork already had Actions enabled, so the Step 2 push ran the path-filtered side workflows (cancel any still running: `gh run list -R jmsether/DroidDeck` then `gh run cancel <id> -R jmsether/DroidDeck`). `build.yml` was not registered: the fork's default branch never receives a push, so `workflow_dispatch` returns 404. The fix, committed on `pixel10` as "ci: build pixel10 pushes on the fork", adds `pixel10` to `build.yml`'s `push.branches`; every non-docs push to `pixel10` then builds an APK. Disable the side workflows:
 ```bash
 for w in build-aaudio-sink build-box64 build-desktop-kde build-directaudio build-game-graphics build-gamescope; do
   gh workflow disable "$w.yml" -R jmsether/DroidDeck || echo "$w.yml is not on the fork's default branch; nothing to disable"
@@ -314,19 +314,19 @@ done
 ```
 Expected: build-aaudio-sink, build-desktop-kde and build-gamescope disabled; the other three exist only on `pixel10` and need no action.
 
-- [ ] **Step 4: Dispatch the build and wait**
+- [ ] **Step 4: Push and wait for the build**
+
+Push `pixel10` (`git push fork pixel10`); the push starts Build APK. Find that run and wait:
 
 ```bash
-WF='-R jmsether/DroidDeck -w build.yml -b pixel10 -e workflow_dispatch'
-BEFORE=$(gh run list $WF -L 1 --json databaseId -q '.[0].databaseId // 0')
-gh workflow run build.yml -R jmsether/DroidDeck --ref pixel10
-RUN=$BEFORE
+SHA=$(git rev-parse HEAD); RUN=0
 for i in $(seq 1 24); do
-  RUN=$(gh run list $WF -L 1 --json databaseId -q '.[0].databaseId // 0')
-  [ "$RUN" != "$BEFORE" ] && break
+  RUN=$(gh run list -R jmsether/DroidDeck -w build.yml -b pixel10 -e push -L 5 --json databaseId,headSha \
+        -q "[.[] | select(.headSha==\"$SHA\")][0].databaseId // 0")
+  [ "$RUN" != "0" ] && break
   sleep 5
 done
-[ "$RUN" != "$BEFORE" ] || { echo 'dispatch not seen after 2 minutes' >&2; exit 1; }
+[ "$RUN" != "0" ] || { echo "no Build APK run for $SHA after 2 minutes" >&2; exit 1; }
 gh run watch "$RUN" -R jmsether/DroidDeck --exit-status --compact
 ```
 Expected: `build` succeeds; `sign`, `announce` and `catalog` are skipped. The first run has no caches (estimate 12–20 min). If it fails, read `gh run view "$RUN" -R jmsether/DroidDeck --log-failed`, fix the cause on `pixel10`, push, and dispatch again.
@@ -1365,16 +1365,14 @@ Ask the user before Step 1 (push and start a CI run) and before Step 2 (download
 
 ```bash
 git push fork pixel10
-WF='-R jmsether/DroidDeck -w build.yml -b pixel10 -e workflow_dispatch'
-BEFORE=$(gh run list $WF -L 1 --json databaseId -q '.[0].databaseId // 0')
-gh workflow run build.yml -R jmsether/DroidDeck --ref pixel10
-RUN=$BEFORE
+SHA=$(git rev-parse HEAD); RUN=0
 for i in $(seq 1 24); do
-  RUN=$(gh run list $WF -L 1 --json databaseId -q '.[0].databaseId // 0')
-  [ "$RUN" != "$BEFORE" ] && break
+  RUN=$(gh run list -R jmsether/DroidDeck -w build.yml -b pixel10 -e push -L 5 --json databaseId,headSha \
+        -q "[.[] | select(.headSha==\"$SHA\")][0].databaseId // 0")
+  [ "$RUN" != "0" ] && break
   sleep 5
 done
-[ "$RUN" != "$BEFORE" ] || { echo 'dispatch not seen after 2 minutes' >&2; exit 1; }
+[ "$RUN" != "0" ] || { echo "no Build APK run for $SHA after 2 minutes" >&2; exit 1; }
 gh run watch "$RUN" -R jmsether/DroidDeck --exit-status --compact
 ```
 Expected: success. If it fails, read `gh run view "$RUN" -R jmsether/DroidDeck --log-failed`, fix the cause on `pixel10`, push, and dispatch again. The hybris step rebuilds (the patches changed the cache key; about 3 minutes) and `check_runtime.py` passes. CI's Python step runs `test_hybris_compat` with network fetches; a failure there blocks the APK.
@@ -1382,7 +1380,7 @@ Expected: success. If it fails, read `gh run view "$RUN" -R jmsether/DroidDeck -
 - [ ] **Step 2: Download and install (user)**
 
 ```bash
-RUN=$(gh run list -R jmsether/DroidDeck -w build.yml -b pixel10 -e workflow_dispatch -L 1 --json databaseId -q '.[0].databaseId')
+RUN=$(gh run list -R jmsether/DroidDeck -w build.yml -b pixel10 -e push -L 1 --json databaseId -q '.[0].databaseId')
 mkdir -p pixel10-runs/apk-m1 && gh run download "$RUN" -R jmsether/DroidDeck -D pixel10-runs/apk-m1
 find pixel10-runs/apk-m1 -type f -name '*.apk' -exec ls -l {} +
 ```
