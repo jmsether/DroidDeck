@@ -146,8 +146,9 @@ object DeviceReport {
         if (gpu.powerVr) {
             h("PowerVR")
             // query() blocks on first use; this report is written on the session-start worker.
-            powerVrRows(com.droiddeck.launcher.gpu.VulkanInfo.query(), File(SystemVulkanDriver.HAL).length())
-                .forEach { (key, value) -> k(key, value) }
+            val viaHybris = SystemVulkanDriver.usesDefault(SessionPrefs.linuxDriver(context))
+            powerVrRows(com.droiddeck.launcher.gpu.VulkanInfo.query(), File(SystemVulkanDriver.HAL).length(),
+                GameEnvironment.POWERVR, viaHybris).forEach { (key, value) -> k(key, value) }
         }
 
         h("Runtime")
@@ -210,16 +211,24 @@ object DeviceReport {
         return b.toString()
     }
 
-    /** The PowerVR block's rows. Keys stay under k()'s 24 columns; absent facts read "unknown". */
-    internal fun powerVrRows(vk: Map<String, String>, halBytes: Long): List<Pair<String, String>> = listOf(
+    /**
+     * The PowerVR block's rows. Keys stay under k()'s 24 columns; absent facts read "unknown", with the
+     * Vulkan failure reason when there is one. [defaults] and the compat layer apply only [viaHybris]:
+     * an imported Linux driver replaces the system driver, so neither is in effect then.
+     */
+    internal fun powerVrRows(
+        vk: Map<String, String>, halBytes: Long, defaults: Map<String, String?>, viaHybris: Boolean,
+    ): List<Pair<String, String>> = listOf(
         "System driver" to "${SystemVulkanDriver.HAL} ($halBytes bytes)",
-        "Vulkan device" to listOfNotNull(vk["device"], vk["api"]?.let { "API $it" }).joinToString(" · ").ifEmpty { "unknown" },
+        "Vulkan device" to listOfNotNull(vk["device"], vk["api"]?.let { "API $it" }).joinToString(" · ")
+            .ifEmpty { "unknown" + (vk["error"]?.let { " ($it)" } ?: "") },
         "Driver" to listOfNotNull(vk["driver_name"], vk["driver_info"]).joinToString(" ").ifEmpty { "unknown" },
         // The phone's own answer through Android's loader; the compat layer's answer is in session.log.
         "Driver BC feature" to (vk["texture_bc"] ?: "unknown"),
-        "Game defaults" to GameEnvironment.POWERVR.entries.joinToString(" ") { (name, value) ->
-            if (value == null) "-$name" else "$name=$value" },
-        "Compat layer" to "session.log: HYBRIS_DRM_PROPERTIES and HYBRIS_BC lines",
+        "Game defaults" to if (viaHybris) defaults.entries.joinToString(" ") { (name, value) ->
+            if (value == null) "-$name" else "$name=$value" } else "none (an imported Linux driver is selected)",
+        "Compat layer" to if (viaHybris) "session.log: HYBRIS_DRM_PROPERTIES and HYBRIS_BC lines"
+            else "not loaded (an imported Linux driver is selected)",
     )
 
     private fun readSys(path: String): String? = FileUtils.readString(File(path))?.trim()?.ifEmpty { null }
