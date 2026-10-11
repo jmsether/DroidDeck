@@ -27,7 +27,7 @@
     ```powershell
     $env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-17.0.20.101-hotspot'; $env:ANDROID_HOME='C:\Android\Sdk'
     $base = Get-Content "$env:USERPROFILE\.cache\droiddeck-pixel10\jvm-baseline.txt"
-    .\gradlew.bat -PskipRust=true :app:testDebugUnitTest --continue --console=plain 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match ' FAILED$' -and $_ -notin $base } | Sort-Object -Unique
+    .\gradlew.bat -PskipRust=true :app:testDebugUnitTest --continue --console=plain 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^\S+ > .+ FAILED$' -and $_ -notin $base } | Sort-Object -Unique
     ```
     Expected: no output (no failing test outside the baseline). Narrow `--tests` runs of the classes this plan adds or changes must pass outright.
   - Python/C (WSL): the suite is red on this base for environment reasons (no D-Bus session for test_login1/test_netmanager, a flaky signal test in test_appimage_run), so compare against the baseline Task 2 Step 6 records:
