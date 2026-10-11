@@ -710,7 +710,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 8: DRM properties fill (`0002-drm-properties.patch`)
 
-New compat module `hybris/vulkan/compat/drm_properties.{c,h}` and an outermost `vkGetPhysicalDeviceProperties2[KHR]` handler in `layer/physical.c`. Protocol: paint the chained `VkPhysicalDeviceDrmPropertiesEXT` payload with a sentinel, call down, and if the driver left it untouched, fill `hasRender`/`renderMajor`/`renderMinor` from `stat("/dev/dri/renderD128")` (`hasPrimary` stays false: PowerVR sessions use gamescope's SDL backend). No node: restore the application's bytes. Driver answered: pass through. One stderr line per outcome per process (`HYBRIS_DRM_PROPERTIES outcome=…`). `HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES=0` disables it.
+New compat module `hybris/vulkan/compat/drm_properties.{c,h}` and an outermost `vkGetPhysicalDeviceProperties2[KHR]` handler in `layer/physical.c`. Protocol (as reworked after review, commit "hybris: per-field DRM fill, true bypass, no sentinel leaks"): paint the six fields of the chained `VkPhysicalDeviceDrmPropertiesEXT` with a sentinel and call down. Every field still holding the sentinel is restored from the application's bytes, so no sentinel ever reaches the app. If all three render fields were untouched, fill `hasRender`/`renderMajor`/`renderMinor` from `stat("/dev/dri/renderD128")`, and clear the primary group only if it was entirely untouched (PowerVR sessions use gamescope's SDL backend, which needs no primary node). Render fields written by the driver: pass through. No node: untouched fields restored. One stderr line per outcome per process (`HYBRIS_DRM_PROPERTIES outcome=…`). `HYBRIS_VULKAN_COMPAT_DRM_PROPERTIES=0` disables it.
 
 **Files:**
 - Create: `tools/tests/hybris_drm_properties_test.c` (Appendix C)
@@ -740,7 +740,7 @@ Copy Appendix A verbatim to `tools/hybris/patches/0002-drm-properties.patch`. Ch
 - [ ] **Step 4: Run it again**
 
 WSL: `python3 -m unittest tools.tests.test_hybris_compat -v`
-Expected: both tests `ok` (the test captures the harness output, `drm_properties: all checks passed` for each of its two runs; it is shown only when a test fails).
+Expected: all tests `ok` (after the review rework the module has three: the characterization test, `test_drm_properties_fill`, `test_layer_properties_handler_compiles`; the captured harness output is shown only when a test fails).
 
 - [ ] **Step 5: Standard checks, then commit**
 
