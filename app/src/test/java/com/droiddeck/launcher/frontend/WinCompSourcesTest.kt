@@ -165,12 +165,16 @@ class WinCompSourcesTest {
     }
 
     @Test fun customWithNoMatchHasTheFolderScanOnly() {
-        val folder = tmp.newFolder("Unknown")
-        File(folder, "_CommonRedist/vcredist/2013").mkdirs()
-        File(folder, "_CommonRedist/vcredist/2013/vcredist_x64.exe").writeText("x")
-        val findings = WinCompSources.forGame(app, game(folder, Library.ADDED))
-        assertTrue(auto(findings).isEmpty())
-        assertEquals(listOf("vcredist2013" to WinCompSources.Origin.FOLDER), findings.map { it.component to it.origin })
+        // The folders above the game's are not its files: a year or a redist name there (JUnit's
+        // random junit<digits> root included) must not change what the scan finds.
+        for (parent in listOf(tmp.root, tmp.newFolder("2010 Classics"), tmp.newFolder("PhysX 2008"))) {
+            val folder = File(parent, "Unknown")
+            File(folder, "_CommonRedist/vcredist/2013").mkdirs()
+            File(folder, "_CommonRedist/vcredist/2013/vcredist_x64.exe").writeText("x")
+            val findings = WinCompSources.forGame(app, game(folder, Library.ADDED))
+            assertTrue(auto(findings).isEmpty())
+            assertEquals(listOf("vcredist2013" to WinCompSources.Origin.FOLDER), findings.map { it.component to it.origin })
+        }
     }
 
     // ---- what turns on, and the user's switches ----

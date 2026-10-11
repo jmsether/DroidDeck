@@ -112,14 +112,16 @@ object DependencyDetector {
 
         fun consider(f: File, isDir: Boolean, insideRedist: Boolean) {
             val name = f.name.lowercase(Locale.US)
-            val path = f.path.replace('\\', '/').lowercase(Locale.US)
+            // Inside the game's folder only: a year or redist name above it is not the game's.
+            val reason = relativeReason(gameDir, f)
+            val path = reason.lowercase(Locale.US)
             // Bundled = in a redist container or an installer (exe/msi/cab); shipped = a loose runtime DLL.
             val kind = if (insideRedist || isDir || name.endsWith(".exe") || name.endsWith(".msi") || name.endsWith(".cab"))
                 Kind.BUNDLED else Kind.SHIPPED
             for (comp in classify(path, name, isDir)) {
                 val existing = hits[comp]
                 if (existing == null) {
-                    hits[comp] = Recommendation(comp, LABELS[comp] ?: comp, relativeReason(gameDir, f), kind)
+                    hits[comp] = Recommendation(comp, LABELS[comp] ?: comp, reason, kind)
                 } else if (existing.kind == Kind.SHIPPED && kind == Kind.BUNDLED) {
                     hits[comp] = existing.copy(kind = Kind.BUNDLED) // a bundled installer outranks a shipped DLL
                 }
@@ -187,7 +189,7 @@ object DependencyDetector {
     }
 
     /**
-     * Map a redist file/dir (its full lowercased [path], leaf [name], and whether it [isDir]) to
+     * Map a redist file/dir (its lowercased [path] inside the game folder, leaf [name], and whether it [isDir]) to
      * catalog component name(s). Empty for things we deliberately skip.
      */
     private fun classify(path: String, name: String, isDir: Boolean): List<String> {
