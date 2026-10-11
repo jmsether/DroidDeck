@@ -42,6 +42,7 @@ import com.droiddeck.launcher.R
 import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.core.GameEnvironmentOptions
 import com.droiddeck.launcher.frontend.Library
+import com.droiddeck.launcher.gpu.SystemVulkanDriver
 import com.droiddeck.launcher.session.GameEnvironmentStore
 import com.droiddeck.launcher.session.SessionPrefs
 import kotlinx.coroutines.Dispatchers
@@ -96,6 +97,8 @@ private fun GameEnvironmentEditor(byPad: Boolean, onClose: () -> Unit) {
     var editing by remember { mutableStateOf<Pair<String, String>?>(null) }
     val preset = SessionPrefs.fexPreset(context)
     val forceSsbs = SessionPrefs.forceSsbs(context)
+    // One file check per editor, not per recomposition.
+    val powerVr = remember { SystemVulkanDriver.isPowerVr() }
     val firstFocus = remember { FocusRequester() }
     var editByPad by remember { mutableStateOf(false) }
     val dialogInput = LocalInputModeManager.current
@@ -160,7 +163,7 @@ private fun GameEnvironmentEditor(byPad: Boolean, onClose: () -> Unit) {
         if (current == null && !error) Small(stringResource(R.string.game_env_loading))
         if (current != null) {
             val own = current.entries(scope)
-            val entries = GameEnvironment.effective(current, preset, scope, forceSsbs).toSortedMap()
+            val entries = GameEnvironment.effective(current, preset, scope, forceSsbs, powerVr).toSortedMap()
             if (entries.isEmpty()) Small(stringResource(R.string.game_env_empty))
             else Panel {
                 entries.entries.forEachIndexed { i, (name, value) ->

@@ -25,7 +25,7 @@ object GameEnvironment {
     fun validValue(value: String) = '\u0000' !in value && value.length <= 8192
     fun validScope(scope: String) = scope.isEmpty() || (Regex("[1-9][0-9]*").matches(scope) && scope.toLongOrNull()?.let { it in 1..4294967295L } == true)
 
-    fun defaults(preset: String, forceSsbs: Boolean = false): Map<String, String?> = linkedMapOf<String, String?>(
+    fun defaults(preset: String, forceSsbs: Boolean = false, powerVr: Boolean = false): Map<String, String?> = linkedMapOf<String, String?>(
         "MESA_SHADER_CACHE_DISABLE" to "false",
         "VKD3D_FEATURE_LEVEL" to "12_2",
         "VKD3D_SHADER_MODEL" to "6_9",
@@ -40,10 +40,24 @@ object GameEnvironment {
         FexPreset.env(preset).forEach { put(it.substringBefore('='), it.substringAfter('=')) }
         // Steam settings' Force SSBS: droiddeck-game-env preloads libssbs.so into the game's Wine.
         if (forceSsbs) put(FORCE_SSBS, "1")
+        if (powerVr) putAll(POWERVR)
     }
+
+    /**
+     * Every game launch on PowerVR, so no game needs settings of its own. "d3d" is the hybris
+     * compat layer's Direct3D BC policy: it decodes the BC formats the driver cannot sample and
+     * reports textureCompressionBC, so Proton's own DXVK accepts the GPU. Steam's Fossilize layer
+     * made DXVK lose its surface. Only game launches read these (droiddeck-game-env), never
+     * gamescope or the Steam client, which the policy's 1.3 cap would otherwise reach.
+     */
+    val POWERVR: Map<String, String?> = linkedMapOf(
+        "HYBRIS_BC_TEXTURES" to "d3d",
+        "DISABLE_VK_LAYER_VALVE_steam_fossilize_1" to "1",
+        "ENABLE_VK_LAYER_VALVE_steam_fossilize_1" to null,
+    )
 
     const val FORCE_SSBS = "DROIDDECK_FORCE_SSBS"
 
-    fun effective(config: Config, preset: String, scope: String, forceSsbs: Boolean = false): Map<String, String?> =
-        defaults(preset, forceSsbs) + config.shared + if (scope.isEmpty()) emptyMap() else config.games[scope].orEmpty()
+    fun effective(config: Config, preset: String, scope: String, forceSsbs: Boolean = false, powerVr: Boolean = false): Map<String, String?> =
+        defaults(preset, forceSsbs, powerVr) + config.shared + if (scope.isEmpty()) emptyMap() else config.games[scope].orEmpty()
 }

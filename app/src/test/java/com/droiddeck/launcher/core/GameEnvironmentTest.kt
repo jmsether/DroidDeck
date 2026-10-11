@@ -19,6 +19,24 @@ class GameEnvironmentTest {
         assertEquals("1", GameEnvironment.effective(config, "", "43", forceSsbs = true)[GameEnvironment.FORCE_SSBS])
     }
 
+    @Test fun powerVrGamesStartWithTheD3dBcPolicyAndWithoutFossilize() {
+        val plain = GameEnvironment.defaults("")
+        GameEnvironment.POWERVR.keys.forEach { assertFalse(it, plain.containsKey(it)) }
+        val pvr = GameEnvironment.defaults("", powerVr = true)
+        assertEquals("d3d", pvr["HYBRIS_BC_TEXTURES"])
+        assertEquals("1", pvr["DISABLE_VK_LAYER_VALVE_steam_fossilize_1"])
+        assertTrue(pvr.containsKey("ENABLE_VK_LAYER_VALVE_steam_fossilize_1"))
+        assertNull(pvr["ENABLE_VK_LAYER_VALVE_steam_fossilize_1"])
+    }
+
+    @Test fun theSharedScopeOrAGameOverridesThePowerVrDefaults() {
+        val config = GameEnvironment.Config(shared = mapOf("HYBRIS_BC_TEXTURES" to "dxvk"))
+            .withEntries("42", mapOf("HYBRIS_BC_TEXTURES" to "0"))
+        assertEquals("0", GameEnvironment.effective(config, "", "42", powerVr = true)["HYBRIS_BC_TEXTURES"])
+        assertEquals("dxvk", GameEnvironment.effective(config, "", "43", powerVr = true)["HYBRIS_BC_TEXTURES"])
+        assertEquals("d3d", GameEnvironment.effective(GameEnvironment.Config(), "", "43", powerVr = true)["HYBRIS_BC_TEXTURES"])
+    }
+
     @Test fun gameOverridesSharedAndPresetWithoutLeakingToOtherGames() {
         val config = GameEnvironment.Config(
             shared = mapOf("FEX_MULTIBLOCK" to "0", "VKD3D_FEATURE_LEVEL" to "12_2"),

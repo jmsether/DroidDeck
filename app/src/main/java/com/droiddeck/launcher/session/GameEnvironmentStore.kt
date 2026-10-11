@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.AtomicFile
 import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.core.TextureFiltering
+import com.droiddeck.launcher.gpu.SystemVulkanDriver
 import com.droiddeck.launcher.runtime.LinuxRuntime
 import org.json.JSONObject
 import java.io.File
@@ -60,7 +61,8 @@ object GameEnvironmentStore {
 
     @Synchronized
     fun publish(context: Context, config: GameEnvironment.Config = read(context)) {
-        val resolved = config.copy(shared = GameEnvironment.defaults(SessionPrefs.fexPreset(context), SessionPrefs.forceSsbs(context)) + config.shared)
+        val resolved = config.copy(shared = GameEnvironment.defaults(SessionPrefs.fexPreset(context),
+            SessionPrefs.forceSsbs(context), SystemVulkanDriver.isPowerVr()) + config.shared)
         val json = encode(resolved)
         // The Display page's texture filtering, as DXVK options the launcher appends to
         // DXVK_CONFIG after the profiles - a user's own DXVK_CONFIG entry keeps its options.
