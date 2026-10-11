@@ -41,3 +41,5 @@ __pycache__/
 .signing.env
 app/src/main/assets/directaudio/
 app/src/main/assets/graphics-profile/
+# Pixel 10 bring-up outputs (tools/pixel10); results worth keeping go in docs/pixel10/bringup-log.md
+pixel10-runs/

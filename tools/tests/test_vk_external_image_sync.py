@@ -7,6 +7,9 @@ import unittest
 
 
 def vulkan_include_args():
+    # An explicit Vulkan-Headers include directory wins (WSL and hosts without the NDK).
+    if os.environ.get("VULKAN_INCLUDE") and (Path(os.environ["VULKAN_INCLUDE"]) / "vulkan/vulkan.h").is_file():
+        return ["-idirafter", os.environ["VULKAN_INCLUDE"]]
     candidates = []
     for name in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"):
         if os.environ.get(name):
