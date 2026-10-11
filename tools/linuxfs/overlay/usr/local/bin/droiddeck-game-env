@@ -507,6 +507,7 @@ def main():
     env = os.environ.copy()
     # The desktop window run (droiddeck-proton-run --window) renders with WineD3D; the graphics profile's DXVK/WSI cannot present there.
     windowed = env.get("PROTON_USE_WINED3D") == "1"
+    # Only the graphics profile is skipped when windowed; the shared defaults (e.g. HYBRIS_BC_TEXTURES) still apply there and are inert (WineD3D renders with GL).
     mark_install_scripts(command, env)
     app_id = game_id(env)
     if app_id:

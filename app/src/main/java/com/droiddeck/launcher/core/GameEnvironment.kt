@@ -47,8 +47,9 @@ object GameEnvironment {
      * Every game launch on PowerVR, so no game needs settings of its own. "d3d" is the hybris
      * compat layer's Direct3D BC policy: it decodes the BC formats the driver cannot sample and
      * reports textureCompressionBC, so Proton's own DXVK accepts the GPU. Steam's Fossilize layer
-     * made DXVK lose its surface. Only game launches read these (droiddeck-game-env), never
-     * gamescope or the Steam client, which the policy's 1.3 cap would otherwise reach.
+     * made DXVK lose its surface. Game launches apply these (droiddeck-game-env, and droiddeck-fex
+     * for native Linux games), never gamescope or the Steam client, which the policy's 1.3 cap
+     * would otherwise reach.
      */
     val POWERVR: Map<String, String?> = linkedMapOf(
         "HYBRIS_BC_TEXTURES" to "d3d",

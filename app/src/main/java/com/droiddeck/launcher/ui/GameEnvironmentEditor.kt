@@ -97,8 +97,8 @@ private fun GameEnvironmentEditor(byPad: Boolean, onClose: () -> Unit) {
     var editing by remember { mutableStateOf<Pair<String, String>?>(null) }
     val preset = SessionPrefs.fexPreset(context)
     val forceSsbs = SessionPrefs.forceSsbs(context)
-    // One file check per editor, not per recomposition.
-    val powerVr = remember { SystemVulkanDriver.isPowerVr() }
+    // The hybris stack (PowerVR, no imported Linux driver): one pref read and file check per editor, not per recomposition.
+    val powerVr = remember { SystemVulkanDriver.usesDefault(SessionPrefs.linuxDriver(context)) }
     val firstFocus = remember { FocusRequester() }
     var editByPad by remember { mutableStateOf(false) }
     val dialogInput = LocalInputModeManager.current

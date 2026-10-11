@@ -178,6 +178,21 @@ class ManagedGraphicsProfileTest(unittest.TestCase):
         for name in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "DROIDDECK_PROTON_WRAPPER", "HYBRIS_BC_TEXTURES"):
             self.assertNotIn(name, env)
 
+    def test_windowed_desktop_run_still_gets_the_published_powervr_defaults(self):
+        self.config["shared"] = {
+            "HYBRIS_BC_TEXTURES": "d3d",
+            "DISABLE_VK_LAYER_VALVE_steam_fossilize_1": "1",
+            "ENABLE_VK_LAYER_VALVE_steam_fossilize_1": None,
+        }
+        env = self.launch(PROTON_USE_WINED3D="1")
+        self.assertEqual(env["PROTON_USE_WINED3D"], "1")
+        for name in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "DROIDDECK_PROTON_WRAPPER"):
+            self.assertNotIn(name, env)
+        # Inert there: WineD3D renders with GL on llvmpipe in the desktop session.
+        self.assertEqual(env["HYBRIS_BC_TEXTURES"], "d3d")
+        self.assertEqual(env["DISABLE_VK_LAYER_VALVE_steam_fossilize_1"], "1")
+        self.assertNotIn("ENABLE_VK_LAYER_VALVE_steam_fossilize_1", env)
+
     def test_published_alias_paths_stay_lexical_while_files_are_confined_canonically(self):
         alias = Path(self.tmp.name) / "app-data-alias"
         alias.symlink_to(Path(self.tmp.name), target_is_directory=True)

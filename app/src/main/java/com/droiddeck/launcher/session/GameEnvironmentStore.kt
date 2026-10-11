@@ -60,9 +60,13 @@ object GameEnvironmentStore {
     }
 
     @Synchronized
-    fun publish(context: Context, config: GameEnvironment.Config = read(context)) {
+    fun publish(
+        context: Context,
+        config: GameEnvironment.Config = read(context),
+        powerVr: Boolean = SystemVulkanDriver.usesDefault(SessionPrefs.linuxDriver(context)),
+    ) {
         val resolved = config.copy(shared = GameEnvironment.defaults(SessionPrefs.fexPreset(context),
-            SessionPrefs.forceSsbs(context), SystemVulkanDriver.isPowerVr()) + config.shared)
+            SessionPrefs.forceSsbs(context), powerVr) + config.shared)
         val json = encode(resolved)
         // The Display page's texture filtering, as DXVK options the launcher appends to
         // DXVK_CONFIG after the profiles - a user's own DXVK_CONFIG entry keeps its options.
