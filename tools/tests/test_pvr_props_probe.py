@@ -133,6 +133,21 @@ class PvrPropsProbeTest(unittest.TestCase):
         self.assertEqual(f["hal.device.name"], ["PowerVR D-Series DXT-48-1536 MC1"])  # printed before the crash
         self.assertIn("section.loader", f)
 
+    def test_a_hung_hal_is_killed_by_the_section_alarm_and_the_loader_section_still_completes(self):
+        # A probe built with a 1 s alarm (the default is 60 s) against a HAL whose properties call never returns.
+        quick = Path(self.temp.name) / "pvr_props_probe_alarm1"
+        command = [shutil.which(os.environ.get("CC", "cc")), *STRICT, *vulkan_include_args(), "-DSECTION_TIMEOUT_S=1",
+                   str(PROBE), "-ldl", "-o", str(quick)]
+        built = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, " ".join(command) + "\n" + built.stdout + built.stderr)
+        ran = subprocess.run([str(quick), str(self.fake)], capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "FAKE_HAL_SPIN": "1"})
+        f = facts(ran.stdout)
+        self.assertNotEqual(ran.returncode, 0)
+        self.assertEqual(f["section.hal"], ["killed signal=14"])  # SIGALRM
+        self.assertEqual(f["hal.device.name"], ["PowerVR D-Series DXT-48-1536 MC1"])  # printed before the hang
+        self.assertRegex(f["section.loader"][0], r"^exit=\d+$")  # ran to its end, whatever the host's loader said
+
     def test_driver_text_is_sanitized(self):
         # Control bytes and newlines in a driver string must not forge extra fact lines.
         _, f = self.run_probe(FAKE_HAL_DRIVER_INFO="25.3@1\nforged.key=1")

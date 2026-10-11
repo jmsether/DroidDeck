@@ -647,7 +647,7 @@ Facts here are measured on the device; anything inferred says so.
 
 - [ ] **Step 2: Phase 0, device facts (user)**
 
-The user connects the Pixel 10 Pro with USB debugging on and accepts the PC's key. PowerShell:
+The user connects the Pixel 10 Pro with USB debugging on and accepts the PC's key. Run tools from PowerShell (Git Bash rewrites /vendor/... arguments):
 ```powershell
 $env:ADB = 'C:\ADB\adb.exe'   # or C:\Android\Sdk\platform-tools\adb.exe
 python tools\pixel10\pixel10.py facts
@@ -667,9 +667,10 @@ python tools\pixel10\pixel10.py probe pixel10-runs\probe\pvr_props_probe
 ```
 Expected: `probe output written to pixel10-runs\<stamp>\probe\props.txt`. Record in the log:
 - loader and HAL `driverInfo` (expected to contain `25.3`), `apiVersion` (1.4.317);
-- HAL `common.version` (the carried hybris patch accepts `0x00010000` and `0x00000001`);
+- HAL device version, `hal.device.version` (the carried hybris patch accepts `0x00010000` and `0x00000001`);
 - the DRM properties result: `untouched`, `zeroed`, or `filled`;
 - `VK_ANDROID_native_buffer` spec version (the ICD needs >= 8) and the `hal.native_buffer.gralloc_fns` line (`v2=1` means `vkGetSwapchainGrallocUsage2ANDROID` is exported);
+- `hal.native_buffer.device` (if vkCreateDevice failed there, the gralloc and usage lines are absent and the native_buffer gate is inconclusive, not a HAL defect: report it);
 - every `hal.native_buffer.usage.*` line (`exceeds_32_bits`; the ICD rejects usage above 32 bits);
 - `textureCompressionBC`, and the optimal features of BC1–BC7 and RGBA8/BGRA8;
 - the `hal.queue.family` lines (flags, count, granularity). BC emulation is refused if any graphics/compute/transfer family lacks compute (flags bit 0x2) or has a granularity other than 1x1x1.

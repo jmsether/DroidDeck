@@ -41,7 +41,9 @@
 #define MAX_EXT 1024
 #define MAX_PD 4
 #define MAX_NODES 64
+#ifndef SECTION_TIMEOUT_S
 #define SECTION_TIMEOUT_S 60
+#endif
 
 #include "hwvulkan_abi.h"
 

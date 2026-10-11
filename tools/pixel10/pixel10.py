@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Pixel 10 bring-up over ADB: device facts (phase 0), the property probe (phase 1), session logs (phase 2).
 
-    python tools/pixel10/pixel10.py facts   [--out DIR]
-    python tools/pixel10/pixel10.py probe   PVR_PROPS_PROBE [--hal PATH] [--out DIR]
-    python tools/pixel10/pixel10.py logs    [--out DIR]
-    python tools/pixel10/pixel10.py install APK
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] facts   [--out DIR]
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] probe   PVR_PROPS_PROBE [--hal PATH] [--out DIR]
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] logs    [--out DIR]
+    python tools/pixel10/pixel10.py [--adb ADB] [--serial SERIAL] install APK
 
-adb is found through --adb, ADB, PATH or ANDROID_HOME/ANDROID_SDK_ROOT; the device through --serial,
-ADB_SERIAL / ANDROID_SERIAL or the only authorized one (tools/adb_device.py). `facts` only reads.
-`probe` pushes one file to /data/local/tmp/pixel10. `install` replaces the app in place and never
-uninstalls anything. Exit codes: 0 done, 2 bad arguments, 3 adb or device error, 4 needs the user.
+--adb and --serial go before the subcommand. adb is found through --adb, ADB, PATH or
+ANDROID_HOME/ANDROID_SDK_ROOT; the device through --serial, ADB_SERIAL / ANDROID_SERIAL or the only
+authorized one (tools/adb_device.py). `facts` only reads. `probe` pushes one file to
+/data/local/tmp/pixel10. `install` replaces the app in place and never uninstalls anything.
+Exit codes: 0 done, 2 bad arguments, 3 adb or device error, 4 needs the user.
 """
 from __future__ import annotations
 
@@ -25,13 +26,20 @@ import sys
 import tarfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(HERE.parent)]  # this folder (build_props_probe) and tools/ (adb_device)
 from adb_device import DeviceResolutionError, resolve_serial  # noqa: E402
+from build_props_probe import is_aarch64_elf  # noqa: E402
 
 PACKAGE = "com.droiddeck.launcher"
 REMOTE = "/data/local/tmp/pixel10"
 SESSION_FOLDER = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{2,}-.+$")
 SHARE_ZIP = re.compile(r"^DroidDeck-.+\.zip$")
+TIMED_OUT = 124  # the exit status timeout(1) uses; what a command that outlived its time limit reports
+# Probe lines echoed to the console: the ones the bring-up gates read. props.txt has everything.
+SUMMARY = re.compile(
+    r"section\.|hal\.(driver\.|drm\.(state|fields)|device\.(version|apiVersion)|bc\.|queue\.(count|family)"
+    r"|native_buffer\.(spec_version|device|gralloc_fns|usage\.))")
 
 # Identity of the build under test: no serial number, account or network name.
 PROPS = (
@@ -70,8 +78,12 @@ RAW = [
     ("ld.config.txt", "cat /linkerconfig/ld.config.txt"),
     ("cpuinfo.txt", "cat /proc/cpuinfo"),
     ("vkjson.json", "cmd gpu vkjson"),
-    ("dumpsys-gpu.txt", "dumpsys gpu"),
+    ("dumpsys-gpu.txt", "dumpsys gpu --global"),  # --global: the per-app records name the installed packages
 ]
+
+
+class AdbError(Exception):
+    """adb itself could not be run (not found, not executable). Exit code 3."""
 
 
 class Adb:
@@ -81,10 +93,13 @@ class Adb:
         self.exe, self.serial = exe, serial
 
     def run(self, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+        argv = [self.exe, "-s", self.serial, *args]
         try:
-            return subprocess.run([self.exe, "-s", self.serial, *args], capture_output=True, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise SystemExit(f"pixel10: adb failed: {error}") from error
+            return subprocess.run(argv, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired as hung:  # one hung command costs itself only; what it printed is kept
+            return subprocess.CompletedProcess(argv, TIMED_OUT, hung.stdout or b"", b"timeout")
+        except OSError as error:
+            raise AdbError(f"adb failed: {error}") from error
 
     def shell(self, command: str, timeout: float = 60) -> subprocess.CompletedProcess:
         return self.run("shell", command, timeout=timeout)
@@ -106,25 +121,60 @@ def section(config: str, name: str) -> str:
 
 
 def facts(adb: Adb, out: Path) -> int:
+    """Every command runs and is written down, failed or not. A run where none of them worked is exit 3."""
     out.mkdir(parents=True, exist_ok=True)
-    report = []
+    report, codes = [], []
     for heading, command in FACTS:
         result = adb.shell(command)
+        codes.append(result.returncode)
         report.append(f"### {heading}\n$ {command}\n{text(result)}[exit {result.returncode}]\n")
     for name, command in RAW:
         result = adb.shell(command, timeout=120)
+        codes.append(result.returncode)
         (out / name).write_bytes(result.stdout)
         report.append(f"### {name}\n$ {command}\n[{len(result.stdout)} bytes saved, exit {result.returncode}]\n")
     config = (out / "ld.config.txt").read_text("utf-8", "replace")
     (out / "ld.config.system.txt").write_text(section(config, "system"), "utf-8")
     (out / "facts.txt").write_text("\n".join(report), "utf-8")
     print(f"facts written to {out / 'facts.txt'}")
+    if all(codes):
+        print("pixel10: every command failed; is the phone connected, unlocked and authorized?", file=sys.stderr)
+        return 3
     return 0
 
 
-def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
+def refuse(problem: str | None) -> bool:
+    """Print a problem with a local file argument; True when there is one (exit 2)."""
+    if problem:
+        print(f"pixel10: {problem}", file=sys.stderr)
+    return problem is not None
+
+
+def probe_problem(binary: Path) -> str | None:
     if not binary.is_file():
-        print(f"pixel10: no such probe binary: {binary}", file=sys.stderr)
+        return f"no such probe binary: {binary}"
+    try:
+        with binary.open("rb") as file:
+            header = file.read(64)
+    except OSError as error:
+        return f"cannot read the probe binary {binary}: {error}"
+    if not is_aarch64_elf(header):
+        return f"{binary} is not an ELF64 AArch64 executable; build it with tools/pixel10/build_props_probe.py"
+    return None
+
+
+def apk_problem(apk: Path) -> str | None:
+    return None if apk.is_file() else f"no such APK: {apk}"
+
+
+# Command -> check of its file argument, run before any device is touched.
+FILE_CHECKS = {"probe": probe_problem, "install": apk_problem}
+
+
+def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
+    """Exit 3 when the probe could not run (adb exit >= 124: timeout, not executable, killed) or printed no
+    section line; a section that died is itself a fact in props.txt, not a failure of this command."""
+    if refuse(probe_problem(binary)):
         return 2
     out.mkdir(parents=True, exist_ok=True)
     adb.shell(f"mkdir -p {REMOTE}")
@@ -137,9 +187,14 @@ def probe(adb: Adb, binary: Path, hal: str | None, out: Path) -> int:
     (out / "props.txt").write_bytes(ran.stdout)
     (out / "props.stderr.txt").write_bytes(ran.stderr)
     for line in text(ran).splitlines():
-        if re.match(r"(section\.|hal\.(driver\.|drm\.state|device\.version|bc\.|native_buffer\.(spec|gralloc)))", line):
+        if SUMMARY.match(line):
             print(line)
     print(f"probe output written to {out / 'props.txt'} (adb exit {ran.returncode})")
+    ran_sections = any(line.startswith("section.") for line in ran.stdout.decode("utf-8", "replace").splitlines())
+    if ran.returncode >= TIMED_OUT or not ran_sections:
+        print(f"pixel10: the probe produced no results (adb exit {ran.returncode}); see {out / 'props.stderr.txt'}",
+              file=sys.stderr)
+        return 3
     return 0
 
 
@@ -170,7 +225,11 @@ def logs(adb: Adb, out: Path) -> int:
         if name:
             packed = adb.run("exec-out", f"run-as {PACKAGE} tar -cf - -C files/logs {shlex.quote(name)}", timeout=300)
             if packed.returncode == 0 and packed.stdout:
-                extract(packed.stdout, out)
+                try:
+                    extract(packed.stdout, out)
+                except (tarfile.TarError, OSError) as error:  # exec-out can hand back error text instead of a tar
+                    print(f"pixel10: the session folder {name} could not be unpacked: {error}", file=sys.stderr)
+                    return 3
                 print(f"session logs {name} written to {out / name}")
                 return 0
         print("pixel10: run-as works but no session folder could be read", file=sys.stderr)
@@ -189,8 +248,7 @@ def logs(adb: Adb, out: Path) -> int:
 
 
 def install(adb: Adb, apk: Path) -> int:
-    if not apk.is_file():
-        print(f"pixel10: no such APK: {apk}", file=sys.stderr)
+    if refuse(apk_problem(apk)):
         return 2
     result = adb.run("install", "-r", "--no-incremental", str(apk), timeout=600)
     output = text(result)
@@ -210,7 +268,7 @@ def adb_path(configured: str | None) -> str:
         if not found and sdk:
             found = shutil.which("adb", path=str(Path(sdk) / "platform-tools"))
     if not found:
-        raise SystemExit("pixel10: adb not found; set ADB to adb.exe or put platform-tools on PATH")
+        raise AdbError("adb not found; set ADB to adb.exe or put platform-tools on PATH")
     return found
 
 
@@ -222,23 +280,25 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for name in ("facts", "probe", "logs"):
         commands.add_parser(name).add_argument("--out", type=Path, default=Path("pixel10-runs") / stamp / name)
-    commands.choices["probe"].add_argument("binary", type=Path)
+    commands.choices["probe"].add_argument("file", type=Path, metavar="PVR_PROPS_PROBE")
     commands.choices["probe"].add_argument("--hal")
-    commands.add_parser("install").add_argument("apk", type=Path)
+    commands.add_parser("install").add_argument("file", type=Path, metavar="APK")
     args = parser.parse_args(argv)
-    exe = adb_path(args.adb)
+    if args.command in FILE_CHECKS and refuse(FILE_CHECKS[args.command](args.file)):
+        return 2  # before any device is looked for
     try:
+        exe = adb_path(args.adb)
         adb = Adb(exe, resolve_serial(exe, args.serial, log=True))
-    except DeviceResolutionError as error:
+        if args.command == "facts":
+            return facts(adb, args.out)
+        if args.command == "probe":
+            return probe(adb, args.file, args.hal, args.out)
+        if args.command == "logs":
+            return logs(adb, args.out)
+        return install(adb, args.file)
+    except (AdbError, DeviceResolutionError) as error:
         print(f"pixel10: {error}", file=sys.stderr)
         return 3
-    if args.command == "facts":
-        return facts(adb, args.out)
-    if args.command == "probe":
-        return probe(adb, args.binary, args.hal, args.out)
-    if args.command == "logs":
-        return logs(adb, args.out)
-    return install(adb, args.apk)
 
 
 if __name__ == "__main__":

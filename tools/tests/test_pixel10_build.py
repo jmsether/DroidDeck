@@ -51,6 +51,8 @@ class BuildPropsProbeTest(unittest.TestCase):
         elf[18:20] = b"\x3e\x00"
         self.assertFalse(build.is_aarch64_elf(bytes(elf)))
         self.assertFalse(build.is_aarch64_elf(b"MZ" + bytes(62)))
+        self.assertFalse(build.is_aarch64_elf(b"\x7fELF\x02\x01"))  # too short to hold e_machine
+        self.assertFalse(build.is_aarch64_elf(b""))
 
 
 if __name__ == "__main__":

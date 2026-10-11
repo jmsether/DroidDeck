@@ -45,7 +45,7 @@ def compile_command(clang, source, output):
 
 
 def is_aarch64_elf(header):
-    return header[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<H", header, 18)[0] == 183
+    return len(header) >= 20 and header[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<H", header, 18)[0] == 183
 
 
 def main():

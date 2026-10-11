@@ -10,6 +10,7 @@
  *   FAKE_HAL_WIDE_USAGE=1                  gralloc producer usage needs more than 32 bits
  *   FAKE_HAL_VERSION=0x00010000            the hw_device_t version (default 0x00000001)
  *   FAKE_HAL_CRASH=1                       vkGetPhysicalDeviceProperties2 dies with SIGSEGV
+ *   FAKE_HAL_SPIN=1                        vkGetPhysicalDeviceProperties2 never returns
  *   FAKE_HAL_DRIVER_INFO=text              VkPhysicalDeviceDriverProperties::driverInfo (default 25.3@6908880)
  */
 #define _GNU_SOURCE
@@ -74,6 +75,8 @@ static void get_properties(VkPhysicalDevice pd, VkPhysicalDeviceProperties *p) {
 }
 static void get_properties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *p2) {
     if (!strcmp(env("FAKE_HAL_CRASH", "0"), "1")) raise(SIGSEGV);
+    if (!strcmp(env("FAKE_HAL_SPIN", "0"), "1"))
+        for (volatile unsigned long n = 0;; n++) {}
     get_properties(pd, &p2->properties);
     const char *drm = env("FAKE_HAL_DRM", "untouched");
     for (VkBaseOutStructure *n = p2->pNext; n; n = n->pNext) {
