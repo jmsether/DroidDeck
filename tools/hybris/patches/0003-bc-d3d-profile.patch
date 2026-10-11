@@ -1,0 +1,515 @@
+diff --git a/hybris/vulkan/Makefile.am b/hybris/vulkan/Makefile.am
+index 2fa943f..69e3cd1 100644
+--- a/hybris/vulkan/Makefile.am
++++ b/hybris/vulkan/Makefile.am
+@@ -11,7 +11,7 @@ libVkLayer_hybris_compat_la_SOURCES = layer/entry.c layer/device.c layer/physica
+     layer/device_features.c layer/device_features.h layer/device_create_sizes.inc \
+     compat/bc_decode.c compat/bc_decode.h compat/shaders/bc_decode.inc \
+     compat/bc_image.c compat/bc_image.h compat/bc_command_state.c compat/bc_command_state.h compat/bc_transfer.c compat/bc_transfer.h \
+-    compat/bc_context.c compat/bc_context.h compat/bc_commands.c compat/bc_resources.c compat/bc_record.c compat/bc_barriers.c compat/bc_image_copy.c compat/bc_policy.c compat/bc_policy.h \
++    compat/bc_context.c compat/bc_context.h compat/bc_commands.c compat/bc_resources.c compat/bc_record.c compat/bc_barriers.c compat/bc_image_copy.c compat/bc_policy.c compat/bc_policy.h compat/bc_rules.c compat/bc_rules.h \
+     compat/application_policy.c compat/application_policy.h \
+     compat/drm_properties.c compat/drm_properties.h \
+     compat/memory_visibility.c compat/memory_visibility.h compat/rendering_segments.c compat/rendering_segments.h \
+diff --git a/hybris/vulkan/compat/bc_policy.c b/hybris/vulkan/compat/bc_policy.c
+index 3124a25..2bd5bea 100644
+--- a/hybris/vulkan/compat/bc_policy.c
++++ b/hybris/vulkan/compat/bc_policy.c
+@@ -3,31 +3,38 @@
+ #define VK_NO_PROTOTYPES
+ #include "bc_policy.h"
+ #include "bc_context.h"
++#include "bc_rules.h"
+ #include "../layer/layer.h"
+ #include <stdlib.h>
++#include <stdio.h>
+ #include <stddef.h>
+ #include <string.h>
+ #include <sys/auxv.h>
+ 
++/* bc_rules.h is Vulkan-free; keep its constants equal to the Vulkan ones. */
++_Static_assert(HYBRIS_BC_SAMPLED == VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT &&
++    HYBRIS_BC_BLIT_SRC == VK_FORMAT_FEATURE_BLIT_SRC_BIT &&
++    HYBRIS_BC_LINEAR == VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT &&
++    HYBRIS_BC_TRANSFER_SRC == VK_FORMAT_FEATURE_TRANSFER_SRC_BIT &&
++    HYBRIS_BC_TRANSFER_DST == VK_FORMAT_FEATURE_TRANSFER_DST_BIT, "BC feature bits");
++_Static_assert(HYBRIS_BC_API_1_4 == VK_MAKE_API_VERSION(0, 1, 4, 0) &&
++    HYBRIS_BC_FORMATS == VK_FORMAT_BC7_SRGB_BLOCK - VK_FORMAT_BC1_RGB_UNORM_BLOCK + 1, "BC rule constants");
++
+ static pthread_once_t policy_once = PTHREAD_ONCE_INIT;
+ static int policy;
+ static void initialize_policy(void)
+ {
+     if (getauxval(AT_SECURE)) return;
+-    const char *value = getenv("HYBRIS_BC_TEXTURES");
+-    if (!value || !strcmp(value, "missing") || !strcmp(value, "1")) policy = 1;
+-    else if (value && !strcmp(value, "force")) policy = 2;
+-    else if (value && !strcmp(value, "dxvk")) policy = 3;
++    policy = hybris_bc_parse_policy(getenv("HYBRIS_BC_TEXTURES"));
+ }
+-int hybris_bc_enabled(void)
++static const struct hybris_bc_traits *traits(void)
+ {
+     pthread_once(&policy_once, initialize_policy);
+-    return policy != 0;
++    return hybris_bc_traits(policy);
+ }
+-static int dxvk_profile(void)
++int hybris_bc_enabled(void)
+ {
+-    pthread_once(&policy_once, initialize_policy);
+-    return policy == 3;
++    return traits()->enabled;
+ }
+ #define PHYSICAL_PROC(name) PFN_vk##name name = (PFN_vk##name)context.resolver(context.instance, "vk" #name)
+ /* Preserve three-channel border replacement when the native image format
+@@ -49,23 +56,37 @@ static unsigned physical_rgb_mask(VkPhysicalDevice physical)
+     }
+     return mask;
+ }
+-unsigned hybris_bc_physical_mask(VkPhysicalDevice physical)
++/* The driver's own optimal features for every BC format and for its decoded
++ * backing (0 when none), plus the driver version for the diagnostic. Returns 0
++ * when emulation cannot run on this device; the answers are then unused. */
++struct bc_probe { uint32_t native[HYBRIS_BC_FORMATS], backing[HYBRIS_BC_FORMATS], api, driver; };
++/* A silent mask of 0 hides why emulation is absent: log the first refusal per process. */
++static int refuse(const char *reason)
++{
++    static int logged;
++    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) fprintf(stderr, "HYBRIS_BC refused: %s\n", reason);
++    return 0;
++}
++static int probe(VkPhysicalDevice physical, struct bc_probe *out)
+ {
+     struct hybris_layer_physical context;
+-    if (!hybris_bc_enabled() || !hybris_layer_lookup_physical(physical, &context) ||
+-        context.api_version < VK_API_VERSION_1_1) return 0;
++    if (!hybris_bc_enabled() || !hybris_layer_lookup_physical(physical, &context)) return 0;
++    if (context.api_version < VK_API_VERSION_1_1) return refuse("application requested Vulkan 1.0");
+     PHYSICAL_PROC(GetPhysicalDeviceProperties); PHYSICAL_PROC(GetPhysicalDeviceQueueFamilyProperties);
+     PHYSICAL_PROC(GetPhysicalDeviceFormatProperties);
+     VkPhysicalDeviceProperties properties;
+     GetPhysicalDeviceProperties(physical, &properties);
+-    /* Core 1.4 includes descriptor-state commands that are not intercepted yet. */
+-    if (properties.apiVersion < VK_API_VERSION_1_1 || (!dxvk_profile() && properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0)) ||
+-        properties.limits.maxStorageBufferRange < 256 ||
+-        properties.limits.minStorageBufferOffsetAlignment >= properties.limits.maxStorageBufferRange) return 0;
++    /* Core 1.4 includes descriptor-state commands that are not intercepted yet;
++     * only a profile that presents 1.3 and masks them may run on such a device. */
++    if (properties.apiVersion < VK_API_VERSION_1_1) return refuse("device below Vulkan 1.1");
++    if (!hybris_bc_api_allowed(traits(), properties.apiVersion)) return refuse("Vulkan 1.4 device needs the dxvk or d3d policy");
++    if (properties.limits.maxStorageBufferRange < 256 ||
++        properties.limits.minStorageBufferOffsetAlignment >= properties.limits.maxStorageBufferRange)
++        return refuse("storage buffer limits too small for the decoder");
+     uint32_t count = 0;
+     GetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
+     VkQueueFamilyProperties queues[32];
+-    if (!count || count > sizeof(queues) / sizeof(queues[0])) return 0;
++    if (!count || count > sizeof(queues) / sizeof(queues[0])) return refuse("unsupported queue family count");
+     GetPhysicalDeviceQueueFamilyProperties(physical, &count, queues);
+     for (uint32_t i = 0; i < count; ++i) {
+         if (!(queues[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT))) continue;
+@@ -74,31 +95,70 @@ unsigned hybris_bc_physical_mask(VkPhysicalDevice physical)
+         if (!(queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) ||
+             queues[i].minImageTransferGranularity.width != 1 ||
+             queues[i].minImageTransferGranularity.height != 1 ||
+-            queues[i].minImageTransferGranularity.depth != 1) return 0;
++            queues[i].minImageTransferGranularity.depth != 1)
++            return refuse("a queue family lacks compute or single-texel transfer granularity");
+     }
+-    unsigned mask = 0;
+-    for (unsigned i = 0; i < 16; ++i) {
++    out->api = properties.apiVersion;
++    out->driver = properties.driverVersion;
++    unsigned rgb = physical_rgb_mask(physical);
++    for (unsigned i = 0; i < HYBRIS_BC_FORMATS; ++i) {
+         VkFormat format = VK_FORMAT_BC1_RGB_UNORM_BLOCK + i;
+-        /* D3D uses BC1 RGBA. Keep RGB-only BC1 unadvertised until absent-alpha
+-         * border semantics are implemented on devices without RGB8 images. */
+-        if (dxvk_profile() && i < 2) continue;
+-        VkFormat backing = hybris_bc_image_format(format, physical_rgb_mask(physical));
+-        if (backing == VK_FORMAT_UNDEFINED) continue;
+-        VkFormatProperties native, decoded;
++        VkFormat backing = hybris_bc_image_format(format, rgb);
++        VkFormatProperties native, decoded = {0};
+         GetPhysicalDeviceFormatProperties(physical, format, &native);
+-        if (policy == 1 && (native.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) continue;
+-        GetPhysicalDeviceFormatProperties(physical, backing, &decoded);
+-        VkFormatFeatureFlags required = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+-            VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+-        if ((decoded.optimalTilingFeatures & required) == required) mask |= 1u << i;
++        if (backing != VK_FORMAT_UNDEFINED) GetPhysicalDeviceFormatProperties(physical, backing, &decoded);
++        out->native[i] = native.optimalTilingFeatures;
++        out->backing[i] = decoded.optimalTilingFeatures;
++    }
++    return 1;
++}
++/* Emulated-format mask, and in *feature whether textureCompressionBC may be
++ * reported, from one probe. Logs the decision once per process. */
++static unsigned physical_state(VkPhysicalDevice physical, int *feature)
++{
++    static int reported;
++    struct bc_probe seen;
++    const struct hybris_bc_traits *rules = traits();
++    if (feature) *feature = 0;
++    if (!probe(physical, &seen)) return 0;
++    unsigned mask = hybris_bc_select(rules, seen.native, seen.backing);
++    int complete = hybris_bc_feature_complete(rules, mask, seen.native, seen.backing);
++    if (feature) *feature = complete;
++    if (!__atomic_exchange_n(&reported, 1, __ATOMIC_RELAXED)) {
++        uint32_t lacking;
++        unsigned gap = hybris_bc_first_gap(rules, mask, seen.native, seen.backing, &lacking);
++        fprintf(stderr, "HYBRIS_BC policy=%d api=0x%x driver=0x%x emulated=0x%x texture_compression=%d"
++            " gap_format=%u lacking=0x%x\n", policy, seen.api, seen.driver, mask, complete,
++            gap < HYBRIS_BC_FORMATS ? (unsigned)VK_FORMAT_BC1_RGB_UNORM_BLOCK + gap : 0u, lacking);
+     }
+     return mask;
+ }
++unsigned hybris_bc_physical_mask(VkPhysicalDevice physical)
++{
++    return physical_state(physical, NULL);
++}
++int hybris_bc_texture_compression(VkPhysicalDevice physical)
++{
++    int feature;
++    physical_state(physical, &feature);
++    return feature;
++}
++/* True when the layer reports textureCompressionBC and the driver does not: the
++ * device-create path must then clear the bit before the driver sees it. */
++int hybris_bc_strip_texture_compression(VkPhysicalDevice physical)
++{
++    struct hybris_layer_physical context;
++    if (!hybris_bc_texture_compression(physical) || !hybris_layer_lookup_physical(physical, &context)) return 0;
++    PHYSICAL_PROC(GetPhysicalDeviceFeatures);
++    VkPhysicalDeviceFeatures native;
++    GetPhysicalDeviceFeatures(physical, &native);
++    return !native.textureCompressionBC;
++}
+ /* The emulation profile implements Vulkan 1.3 plus maintenance6. Do not expose
+  * 1.4 core host-copy/push-descriptor operations that bypass our state tracking. */
+ static void cap_properties(VkPhysicalDevice physical, VkPhysicalDeviceProperties *out)
+ {
+-    if (dxvk_profile() && hybris_bc_physical_mask(physical) && out->apiVersion > VK_API_VERSION_1_3)
++    if (traits()->profile13 && hybris_bc_physical_mask(physical) && out->apiVersion > VK_API_VERSION_1_3)
+         out->apiVersion = VK_API_VERSION_1_3;
+ }
+ static void VKAPI_CALL properties(VkPhysicalDevice physical, VkPhysicalDeviceProperties *out)
+@@ -134,9 +194,8 @@ int hybris_bc_format_properties(VkPhysicalDevice physical, VkFormat format, VkFo
+     PHYSICAL_PROC(GetPhysicalDeviceFormatProperties);
+     VkFormatProperties decoded;
+     GetPhysicalDeviceFormatProperties(physical, hybris_bc_image_format(format, physical_rgb_mask(physical)), &decoded);
+-    *properties = (VkFormatProperties){.optimalTilingFeatures = decoded.optimalTilingFeatures &
+-        (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+-         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT)};
++    /* The application's image is the decoded one, so a blit reads it directly. */
++    *properties = (VkFormatProperties){.optimalTilingFeatures = hybris_bc_emulated_features(decoded.optimalTilingFeatures)};
+     return 1;
+ }
+ int hybris_bc_extension_allowed(const char *name)
+@@ -150,7 +209,7 @@ int hybris_bc_extension_allowed(const char *name)
+     };
+     for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i)
+         if (!strcmp(name, unsupported[i])) {
+-            if (dxvk_profile() && !strcmp(name, "VK_KHR_maintenance6")) continue;
++            if (traits()->profile13 && !strcmp(name, "VK_KHR_maintenance6")) continue;
+             return 0;
+         }
+     return 1;
+@@ -162,9 +221,9 @@ static unsigned unsupported_feature_count(VkStructureType type)
+     switch (type) {
+     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT: return 4;
+     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES:
+-        return dxvk_profile() ? (offsetof(VkPhysicalDeviceVulkan14Features, pushDescriptor) -
++        return traits()->profile13 ? (offsetof(VkPhysicalDeviceVulkan14Features, pushDescriptor) -
+             offsetof(VkPhysicalDeviceVulkan14Features, globalPriorityQuery)) / sizeof(VkBool32) + 1 : 0;
+-    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES_KHR: return dxvk_profile() ? 0 : 1;
++    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES_KHR: return traits()->profile13 ? 0 : 1;
+     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PER_STAGE_DESCRIPTOR_SET_FEATURES_NV: return 2;
+     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT:
+     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT:
+@@ -180,10 +239,13 @@ static unsigned unsupported_feature_count(VkStructureType type)
+ }
+ VkResult hybris_bc_prepare_device(VkPhysicalDevice physical, const VkDeviceCreateInfo *info)
+ {
+-    if (!hybris_bc_physical_mask(physical)) return VK_SUCCESS;
++    int feature;
++    if (!physical_state(physical, &feature)) return VK_SUCCESS;
+     for (uint32_t i = 0; i < info->enabledExtensionCount; ++i)
+         if (!hybris_bc_extension_allowed(info->ppEnabledExtensionNames[i])) return VK_ERROR_EXTENSION_NOT_PRESENT;
+-    if (info->pEnabledFeatures && (info->pEnabledFeatures->pipelineStatisticsQuery || info->pEnabledFeatures->textureCompressionBC)) return VK_ERROR_FEATURE_NOT_PRESENT;
++    /* textureCompressionBC may be enabled exactly when the layer reports it. */
++    if (info->pEnabledFeatures && (info->pEnabledFeatures->pipelineStatisticsQuery ||
++        (info->pEnabledFeatures->textureCompressionBC && !feature))) return VK_ERROR_FEATURE_NOT_PRESENT;
+     for (const VkBaseInStructure *node = info->pNext; node; node = node->pNext) {
+         unsigned count = unsupported_feature_count(node->sType);
+         for (unsigned i = 0; i < count; ++i) {
+@@ -195,7 +257,7 @@ VkResult hybris_bc_prepare_device(VkPhysicalDevice physical, const VkDeviceCreat
+             ((const VkDeviceGroupDeviceCreateInfo *)node)->physicalDeviceCount != 1) return VK_ERROR_FEATURE_NOT_PRESENT;
+         if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 &&
+             (((const VkPhysicalDeviceFeatures2 *)node)->features.pipelineStatisticsQuery ||
+-             ((const VkPhysicalDeviceFeatures2 *)node)->features.textureCompressionBC)) return VK_ERROR_FEATURE_NOT_PRESENT;
++             (((const VkPhysicalDeviceFeatures2 *)node)->features.textureCompressionBC && !feature))) return VK_ERROR_FEATURE_NOT_PRESENT;
+         if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES &&
+             ((const VkPhysicalDeviceVulkan11Features *)node)->protectedMemory) return VK_ERROR_FEATURE_NOT_PRESENT;
+         if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES &&
+@@ -241,13 +303,24 @@ static void VKAPI_CALL queue_properties2_core(VkPhysicalDevice physical, uint32_
+ { queue_properties2(physical, count, out, "vkGetPhysicalDeviceQueueFamilyProperties2"); }
+ static void VKAPI_CALL queue_properties2_khr(VkPhysicalDevice physical, uint32_t *count, VkQueueFamilyProperties2 *out)
+ { queue_properties2(physical, count, out, "vkGetPhysicalDeviceQueueFamilyProperties2KHR"); }
++/* Hide what emulation cannot honor. textureCompressionBC is raised only when the
++ * policy's formats are complete, and lowered while emulating anything else. */
++static unsigned filter_features(VkPhysicalDevice physical, VkPhysicalDeviceFeatures *out)
++{
++    int feature;
++    unsigned mask = physical_state(physical, &feature);
++    if (mask) out->pipelineStatisticsQuery = VK_FALSE;
++    if (feature) out->textureCompressionBC = VK_TRUE;
++    else if (mask) out->textureCompressionBC = VK_FALSE;
++    return mask;
++}
+ static void VKAPI_CALL features(VkPhysicalDevice physical, VkPhysicalDeviceFeatures *out)
+ {
+     struct hybris_layer_physical context;
+     if (!hybris_layer_lookup_physical(physical, &context)) return;
+     PHYSICAL_PROC(GetPhysicalDeviceFeatures);
+     GetPhysicalDeviceFeatures(physical, out);
+-    if (hybris_bc_physical_mask(physical)) out->pipelineStatisticsQuery = out->textureCompressionBC = VK_FALSE;
++    filter_features(physical, out);
+ }
+ static void features2(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2 *out, const char *name)
+ {
+@@ -255,8 +328,7 @@ static void features2(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2 *out,
+     if (!hybris_layer_lookup_physical(physical, &context)) return;
+     PFN_vkGetPhysicalDeviceFeatures2 query = (PFN_vkGetPhysicalDeviceFeatures2)context.resolver(context.instance, name);
+     query(physical, out);
+-    if (!hybris_bc_physical_mask(physical)) return;
+-    out->features.pipelineStatisticsQuery = out->features.textureCompressionBC = VK_FALSE;
++    if (!filter_features(physical, &out->features)) return;
+     for (VkBaseOutStructure *node = out->pNext; node; node = node->pNext) {
+         unsigned count = unsupported_feature_count(node->sType);
+         if (count) memset((char *)node + sizeof(VkBaseOutStructure), 0, count * sizeof(VkBool32));
+diff --git a/hybris/vulkan/compat/bc_policy.h b/hybris/vulkan/compat/bc_policy.h
+index a2aff46..784a9db 100644
+--- a/hybris/vulkan/compat/bc_policy.h
++++ b/hybris/vulkan/compat/bc_policy.h
+@@ -4,6 +4,8 @@
+ #include <vulkan/vulkan.h>
+ int hybris_bc_enabled(void);
+ unsigned hybris_bc_physical_mask(VkPhysicalDevice physical);
++int hybris_bc_texture_compression(VkPhysicalDevice physical);
++int hybris_bc_strip_texture_compression(VkPhysicalDevice physical);
+ int hybris_bc_format_properties(VkPhysicalDevice physical, VkFormat format, VkFormatProperties *properties);
+ int hybris_bc_extension_allowed(const char *name);
+ VkResult hybris_bc_prepare_device(VkPhysicalDevice physical, const VkDeviceCreateInfo *info);
+diff --git a/hybris/vulkan/compat/bc_rules.c b/hybris/vulkan/compat/bc_rules.c
+new file mode 100644
+index 0000000..e361f6f
+--- /dev/null
++++ b/hybris/vulkan/compat/bc_rules.c
+@@ -0,0 +1,90 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#include "bc_rules.h"
++#include <string.h>
++
++/* One row per policy; this table is the only place policies differ.
++ * missing: emulate formats lacking native sampling; no Vulkan 1.4.
++ * force:   emulate every BC format; no Vulkan 1.4.
++ * dxvk:    force + Direct3D set only + Vulkan 1.4 presented as 1.3.
++ * d3d:     dxvk's profile, but a native format stays native when it already
++ *          has every feature textureCompressionBC needs. */
++static const struct hybris_bc_traits table[HYBRIS_BC_POLICIES] = {
++    [HYBRIS_BC_OFF] = {0},
++    [HYBRIS_BC_MISSING] = {.enabled = 1, .native_first = 1, .native_keeps = HYBRIS_BC_SAMPLED},
++    [HYBRIS_BC_FORCE] = {.enabled = 1},
++    [HYBRIS_BC_DXVK] = {.enabled = 1, .profile13 = 1, .skip = HYBRIS_BC_BC1_RGB_FORMATS,
++        .feature_formats = HYBRIS_BC_D3D_FORMATS},
++    [HYBRIS_BC_D3D] = {.enabled = 1, .profile13 = 1, .native_first = 1, .native_keeps = HYBRIS_BC_REQUIRED,
++        .skip = HYBRIS_BC_BC1_RGB_FORMATS, .feature_formats = HYBRIS_BC_D3D_FORMATS},
++};
++static const uint32_t no_features[HYBRIS_BC_FORMATS];
++
++int hybris_bc_parse_policy(const char *text)
++{
++    static const struct { const char *text; int policy; } names[] = {
++        {"missing", HYBRIS_BC_MISSING}, {"1", HYBRIS_BC_MISSING}, {"force", HYBRIS_BC_FORCE},
++        {"dxvk", HYBRIS_BC_DXVK}, {"d3d", HYBRIS_BC_D3D}};
++    if (!text) return HYBRIS_BC_MISSING;
++    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
++        if (!strcmp(text, names[i].text)) return names[i].policy;
++    return HYBRIS_BC_OFF;
++}
++
++const struct hybris_bc_traits *hybris_bc_traits(int policy)
++{
++    return &table[policy > 0 && policy < HYBRIS_BC_POLICIES ? policy : HYBRIS_BC_OFF];
++}
++
++int hybris_bc_api_allowed(const struct hybris_bc_traits *traits, uint32_t device_api)
++{
++    return traits->profile13 || device_api < HYBRIS_BC_API_1_4;
++}
++
++uint32_t hybris_bc_emulated_features(uint32_t backing)
++{
++    return backing & (HYBRIS_BC_SAMPLED | HYBRIS_BC_LINEAR | HYBRIS_BC_BLIT_SRC | HYBRIS_BC_TRANSFER);
++}
++
++unsigned hybris_bc_select(const struct hybris_bc_traits *traits,
++    const uint32_t native[HYBRIS_BC_FORMATS], const uint32_t backing[HYBRIS_BC_FORMATS])
++{
++    /* The decoded backing must itself be sampleable and copyable. */
++    const uint32_t need = HYBRIS_BC_SAMPLED | HYBRIS_BC_TRANSFER;
++    if (!traits->enabled) return 0;
++    if (!native) native = no_features;
++    if (!backing) backing = no_features;
++    unsigned mask = 0;
++    for (unsigned i = 0; i < HYBRIS_BC_FORMATS; ++i) {
++        if ((traits->skip >> i) & 1) continue;
++        if ((backing[i] & need) != need) continue;
++        if (traits->native_first && (native[i] & traits->native_keeps) == traits->native_keeps) continue;
++        mask |= 1u << i;
++    }
++    return mask;
++}
++
++unsigned hybris_bc_first_gap(const struct hybris_bc_traits *traits, unsigned mask,
++    const uint32_t native[HYBRIS_BC_FORMATS], const uint32_t backing[HYBRIS_BC_FORMATS], uint32_t *lacking)
++{
++    uint32_t sink;
++    if (!lacking) lacking = &sink;
++    if (!native) native = no_features;
++    if (!backing) backing = no_features;
++    *lacking = 0;
++    for (unsigned i = 0; i < HYBRIS_BC_FORMATS; ++i) {
++        if (!((traits->feature_formats >> i) & 1)) continue;
++        uint32_t have = ((mask >> i) & 1) ? hybris_bc_emulated_features(backing[i]) : native[i];
++        if ((have & HYBRIS_BC_REQUIRED) != HYBRIS_BC_REQUIRED) {
++            *lacking = HYBRIS_BC_REQUIRED & ~have;
++            return i;
++        }
++    }
++    return HYBRIS_BC_FORMATS;
++}
++
++int hybris_bc_feature_complete(const struct hybris_bc_traits *traits, unsigned mask,
++    const uint32_t native[HYBRIS_BC_FORMATS], const uint32_t backing[HYBRIS_BC_FORMATS])
++{
++    return traits->enabled && traits->feature_formats &&
++        hybris_bc_first_gap(traits, mask, native, backing, NULL) == HYBRIS_BC_FORMATS;
++}
+diff --git a/hybris/vulkan/compat/bc_rules.h b/hybris/vulkan/compat/bc_rules.h
+new file mode 100644
+index 0000000..0337331
+--- /dev/null
++++ b/hybris/vulkan/compat/bc_rules.h
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#ifndef HYBRIS_BC_RULES_H
++#define HYBRIS_BC_RULES_H
++#include <stdint.h>
++
++/* Pure BC-emulation rules: no Vulkan headers, calls or global state, so every
++ * decision below is host-testable. bc_policy.c supplies the driver's answers
++ * and converts the results back to Vulkan types.
++ *
++ * Rail contract: HYBRIS_BC_TEXTURES text maps to a policy (NULL selects
++ * "missing", unknown text selects off); an unknown policy number resolves to
++ * the off traits; feature words are used as given; format arrays hold exactly
++ * HYBRIS_BC_FORMATS entries indexed by VkFormat - VK_FORMAT_BC1_RGB_UNORM_BLOCK
++ * and a NULL array reads as "no features". No events, no allocation. */
++enum { HYBRIS_BC_OFF, HYBRIS_BC_MISSING, HYBRIS_BC_FORCE, HYBRIS_BC_DXVK, HYBRIS_BC_D3D, HYBRIS_BC_POLICIES };
++#define HYBRIS_BC_FORMATS 16u
++/* Index set 2..15: the Direct3D formats, i.e. every BC format except BC1 RGB. */
++#define HYBRIS_BC_D3D_FORMATS 0xFFFCu
++#define HYBRIS_BC_BC1_RGB_FORMATS 0x0003u
++/* Values equal VK_FORMAT_FEATURE_*_BIT; bc_policy.c asserts that at build time. */
++#define HYBRIS_BC_SAMPLED 0x00000001u
++#define HYBRIS_BC_BLIT_SRC 0x00000400u
++#define HYBRIS_BC_LINEAR 0x00001000u
++#define HYBRIS_BC_TRANSFER_SRC 0x00004000u
++#define HYBRIS_BC_TRANSFER_DST 0x00008000u
++#define HYBRIS_BC_TRANSFER (HYBRIS_BC_TRANSFER_SRC | HYBRIS_BC_TRANSFER_DST)
++/* Optimal-tiling features each BC format needs before textureCompressionBC
++ * can be reported (Vulkan: sampled, blit source, linear filter; transfer
++ * source/destination follow from sampled for Vulkan 1.1 and newer). */
++#define HYBRIS_BC_REQUIRED (HYBRIS_BC_SAMPLED | HYBRIS_BC_LINEAR | HYBRIS_BC_BLIT_SRC | HYBRIS_BC_TRANSFER)
++/* VK_MAKE_API_VERSION(0, 1, 4, 0) */
++#define HYBRIS_BC_API_1_4 0x00404000u
++
++struct hybris_bc_traits {
++    int enabled;               /* the policy intercepts anything at all */
++    int profile13;             /* runs on Vulkan 1.4 devices, presented as 1.3 plus maintenance6 */
++    int native_first;          /* a native format that has native_keeps stays native */
++    uint32_t native_keeps;
++    unsigned skip;             /* formats that are never emulated */
++    unsigned feature_formats;  /* formats that must be complete to report textureCompressionBC; 0 = never report */
++};
++
++/* NULL -> missing, "missing"/"1" -> missing, "force", "dxvk", "d3d", anything else -> off. */
++int hybris_bc_parse_policy(const char *text);
++/* Total: an unknown policy resolves to the off traits. */
++const struct hybris_bc_traits *hybris_bc_traits(int policy);
++/* Device-level gate: 1.4 and newer devices need a profile13 policy. */
++int hybris_bc_api_allowed(const struct hybris_bc_traits *traits, uint32_t device_api);
++/* Bit i set = format i is emulated. native/backing are optimalTilingFeatures of
++ * the format and of its decoded backing format (0 when no backing exists). */
++unsigned hybris_bc_select(const struct hybris_bc_traits *traits,
++    const uint32_t native[HYBRIS_BC_FORMATS], const uint32_t backing[HYBRIS_BC_FORMATS]);
++/* Features an emulated format exposes, derived from its backing format. */
++uint32_t hybris_bc_emulated_features(uint32_t backing);
++/* First feature format (index) that lacks HYBRIS_BC_REQUIRED once emulation is
++ * applied, with the missing bits in *lacking (may be NULL);
++ * HYBRIS_BC_FORMATS means none. */
++unsigned hybris_bc_first_gap(const struct hybris_bc_traits *traits, unsigned mask,
++    const uint32_t native[HYBRIS_BC_FORMATS], const uint32_t backing[HYBRIS_BC_FORMATS], uint32_t *lacking);
++/* 1 only when the traits report the feature and no format has a gap. */
++int hybris_bc_feature_complete(const struct hybris_bc_traits *traits, unsigned mask,
++    const uint32_t native[HYBRIS_BC_FORMATS], const uint32_t backing[HYBRIS_BC_FORMATS]);
++#endif
+diff --git a/hybris/vulkan/layer/device_features.c b/hybris/vulkan/layer/device_features.c
+index b7cdfba..b18490b 100644
+--- a/hybris/vulkan/layer/device_features.c
++++ b/hybris/vulkan/layer/device_features.c
+@@ -2,6 +2,7 @@
+ #define VK_NO_PROTOTYPES
+ #include "device_features.h"
+ #include "../compat/vertex_stores.h"
++#include "../compat/bc_policy.h"
+ #include "../compat/clip_distance.h"
+ #include "../compat/scaled_vertex.h"
+ #include <vulkan/vk_layer.h>
+@@ -36,11 +37,14 @@ VkResult hybris_device_features_prepare(VkPhysicalDevice physical,
+     *out = (struct hybris_device_features){.info = *info};
+     int clip = hybris_clip_active(physical);
+     int stores = hybris_vertex_stores_active(physical);
+-    if (!clip && !stores) return VK_SUCCESS;
++    /* Reported by the layer, not the driver: the driver must not see it enabled. */
++    int bc = hybris_bc_strip_texture_compression(physical);
++    if (!clip && !stores && !bc) return VK_SUCCESS;
+     if (info->pEnabledFeatures) {
+         out->features = *info->pEnabledFeatures;
+         if (clip) out->features.shaderClipDistance = VK_FALSE;
+         if (stores) out->features.vertexPipelineStoresAndAtomics = VK_FALSE;
++        if (bc) out->features.textureCompressionBC = VK_FALSE;
+         out->info.pEnabledFeatures = &out->features;
+     }
+     const VkBaseInStructure *target = info->pNext;
+@@ -48,7 +52,8 @@ VkResult hybris_device_features_prepare(VkPhysicalDevice physical,
+         target = target->pNext;
+     if (!target) return VK_SUCCESS;
+     const VkPhysicalDeviceFeatures *requested = &((const VkPhysicalDeviceFeatures2 *)target)->features;
+-    if (!(clip && requested->shaderClipDistance) && !(stores && requested->vertexPipelineStoresAndAtomics))
++    if (!(clip && requested->shaderClipDistance) && !(stores && requested->vertexPipelineStoresAndAtomics) &&
++        !(bc && requested->textureCompressionBC))
+         return VK_SUCCESS;
+ 
+     /* Only copy the prefix needed to replace Features2. Preserve every other
+@@ -75,6 +80,7 @@ VkResult hybris_device_features_prepare(VkPhysicalDevice physical,
+         if (node == target) {
+             if (clip) ((VkPhysicalDeviceFeatures2 *)copy)->features.shaderClipDistance = VK_FALSE;
+             if (stores) ((VkPhysicalDeviceFeatures2 *)copy)->features.vertexPipelineStoresAndAtomics = VK_FALSE;
++            if (bc) ((VkPhysicalDeviceFeatures2 *)copy)->features.textureCompressionBC = VK_FALSE;
+             copy->pNext = (void *)out->suffix;
+             break;
+         }

@@ -76,7 +76,8 @@ class HybrisCompatTest(unittest.TestCase):
         sentinel = "candidate->common.version != HARDWARE_DEVICE_API_VERSION(0, 1)"
         self.assertTrue(sentinel in (self.vulkan / "icd/icd.c").read_text(errors="replace"),
                         "tree is not patched with powervr-hal-version.patch")
-        objects = [self.vulkan / "compat/bc_policy.c", self.vulkan / "compat/bc_image.c"]
+        objects = [self.vulkan / "compat/bc_policy.c", self.vulkan / "compat/bc_image.c",
+                   *sorted(self.vulkan.glob("compat/bc_rules.c"))]
         command = [self.compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-pthread", "-fsyntax-only",
                    "-I", str(self.include), "-I", str(self.vulkan), *map(str, objects)]
         checked = subprocess.run(command, capture_output=True, text=True, errors="replace")
@@ -99,6 +100,18 @@ class HybrisCompatTest(unittest.TestCase):
         program = self.build("drm-layer", [TESTS / "hybris_drm_layer_test.c", self.vulkan / "layer/physical.c",
                                            self.vulkan / "compat/drm_properties.c"])
         self.run_program(program)
+
+    def test_bc_rules(self):
+        program = self.build("bc-rules", [TESTS / "hybris_bc_rules_check.c", self.vulkan / "compat/bc_rules.c"])
+        self.assertIn("failures=0", self.run_program(program).stdout)
+
+    def test_bc_policy_against_a_vulkan_1_4_driver(self):
+        program = self.build("bc-policy", [TESTS / "hybris_bc_policy_fake.c",
+                                           *(self.vulkan / f"compat/{name}.c" for name in ("bc_policy", "bc_rules", "bc_image"))])
+        for policy in ("unset", "missing", "force", "dxvk", "d3d", "0"):
+            with self.subTest(policy=policy):
+                env = {} if policy == "unset" else {"HYBRIS_BC_TEXTURES": policy}
+                self.assertIn("failures=0", self.run_program(program, policy, **env).stdout)
 
 
 if __name__ == "__main__":
