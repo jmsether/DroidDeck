@@ -505,6 +505,8 @@ def main():
     if not command:
         return 2
     env = os.environ.copy()
+    # The desktop window run (droiddeck-proton-run --window) renders with WineD3D; the graphics profile's DXVK/WSI cannot present there.
+    windowed = env.get("PROTON_USE_WINED3D") == "1"
     mark_install_scripts(command, env)
     app_id = game_id(env)
     if app_id:
@@ -534,7 +536,7 @@ def main():
                 env = apply_config(env, {"version": 1}, app_id, fixes)
         except (OSError, ValueError, TypeError, AttributeError):
             print("droiddeck-game-env: invalid configuration; using inherited environment", file=sys.stderr)
-        if waiting and isinstance(config, dict) and config.get("graphicsProfile") is not None:
+        if waiting and not windowed and isinstance(config, dict) and config.get("graphicsProfile") is not None:
             try:
                 # This app-owned profile owns its keys and is intentionally applied after the
                 # user's shared/game environment and DroidDeck's engine fixes.

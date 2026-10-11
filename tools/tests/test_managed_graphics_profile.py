@@ -3,8 +3,10 @@ import json
 import os
 from pathlib import Path
 import runpy
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 BIN = Path(__file__).resolve().parents[1] / "linuxfs/overlay/usr/local/bin"
@@ -144,6 +146,37 @@ class ManagedGraphicsProfileTest(unittest.TestCase):
         (self.pack / "extra.py").symlink_to(self.pack / "run-proton.py")
         with self.assertRaisesRegex(MODULE["GraphicsProfileError"], "unexpected entry"):
             MODULE["apply_graphics_profile_for_launch"](self.command, self.env, self.config)
+
+    def launch(self, **inherited):
+        """Run main() like the Steam client's launch and return the environment handed to Proton."""
+        root = Path(self.tmp.name)
+        config = root / "home/.config/droiddeck/game-environment.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(self.config))
+        environ = {"HOME": str(root / "home"), "STEAM_COMPAT_DATA_PATH": str(root / "compatdata/42"), **inherited}
+        launched, scope = [], MODULE["main"].__globals__
+        saved = {name: scope[name] for name in ("exec_proton", "load_sync")}
+        scope["exec_proton"] = lambda command, env: launched.append(env)
+        scope["load_sync"] = lambda: None
+        try:
+            with mock.patch.dict(os.environ, environ, clear=True), \
+                    mock.patch.object(sys, "argv", ["droiddeck-game-env", "/proton", "waitforexitandrun", str(root / "game.exe")]):
+                MODULE["main"]()
+        finally:
+            scope.update(saved)
+        return launched[-1]
+
+    def test_profile_applies_to_a_launch_that_did_not_ask_for_wined3d(self):
+        env = self.launch()
+        self.assertEqual(env["VK_INSTANCE_LAYERS"], "VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat")
+        self.assertEqual(env["DROIDDECK_PROTON_WRAPPER"], str(self.pack / "run-proton.py"))
+        self.assertNotIn("PROTON_USE_WINED3D", env)
+
+    def test_windowed_desktop_run_keeps_wined3d_and_gets_no_profile_layers(self):
+        env = self.launch(PROTON_USE_WINED3D="1")
+        self.assertEqual(env["PROTON_USE_WINED3D"], "1")
+        for name in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "DROIDDECK_PROTON_WRAPPER", "HYBRIS_BC_TEXTURES"):
+            self.assertNotIn(name, env)
 
     def test_published_alias_paths_stay_lexical_while_files_are_confined_canonically(self):
         alias = Path(self.tmp.name) / "app-data-alias"
