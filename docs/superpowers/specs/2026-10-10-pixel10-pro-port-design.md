@@ -26,7 +26,7 @@ port exists. Prior art:
 
 | Effort | Transport | Furthest result | Device |
 |---|---|---|---|
-| `wallentx/dev` (= tag `v0.3.2-progress.20261010.4`, `abe58618`) | libhybris (taowen/libhybris `bc8cb358`) + `android_wlegl` compositor import + gamescope p12 patches 0120–0125 + manual DXVK BC profile | Steam UI; Dark Souls Remastered ~16 FPS | Pixel 11 Pro XL (Tensor G6, driver 26.1) |
+| `wallentx/dev` at research time (= tag `v0.3.2-progress.20261010.4`, `abe58618`) | libhybris (taowen/libhybris `bc8cb358`) + `android_wlegl` compositor import + gamescope p12 patches 0120–0125 + manual DXVK BC profile | Steam UI; Dark Souls Remastered ~16 FPS | Pixel 11 Pro XL (Tensor G6, driver 26.1) |
 | `gogetwoo/pixel-venus`, `Masuary/pixel-powervr` | Venus over vtest | Steam sign-in, frozen/flickering frames; vtest has no dma_buf import | Pixel 10 Pro XL |
 | `Fizzolas/DroidDeckTensor` | own libhybris build | Steam client segfaults in the bionic linker; commits proprietary vendor blobs (never copy) | Pixel 10 Pro XL |
 
@@ -90,7 +90,7 @@ Each phase is gated on device evidence; nothing is fixed on a prediction alone.
    `/proc/cpuinfo` features; Vulkan driver string; the `[system]` section of
    `/linkerconfig/ld.config.txt`. Turn on the developer option that disables
    child-process restrictions (DroidDeck's Setup explains it).
-2. **Phase 1 — probes.** a bionic property probe (`tools/pixel10/pvr_props_probe.c`)
+2. **Phase 1 — probes.** A bionic property probe (`tools/pixel10/pvr_props_probe.c`)
    recording: HAL `common.version` (the carried patch accepts `0x00010000` and
    `0x00000001`), `VkPhysicalDeviceDrmPropertiesEXT` contents,
    `VK_ANDROID_native_buffer` spec version (ICD requires ≥ 8), swapchain gralloc usage
@@ -110,7 +110,7 @@ Milestones:
 - **M2** — DX9/DX11 games reach gameplay through stock Proton DXVK, no per-game settings.
 - **M3** — a DX12 game reaches gameplay through stock Proton VKD3D-Proton.
 
-The user supplies 2–3 test titles spanning DX9/11/12 at M2.
+The user supplies 2–3 DX9/DX11 test titles at M2 and one DX12 title at M3.
 
 ## 6. Changes
 
@@ -163,7 +163,9 @@ VKD3D-Proton requires `VK_KHR_push_descriptor`, `maintenance5` and `maintenance6
 compat layer hides `VK_KHR_push_descriptor` whenever it emulates a BC format, because
 `hybris_bc_restore_compute` cannot replay push descriptors around the decoder dispatch.
 M3 therefore needs push-descriptor journaling for the compute bind point. It is designed
-in Plan 2 from M2 evidence.
+in Plan 2 from M2 evidence. Plan 2 also covers the driver-25.3
+`IMG_vkCreatePipelineCache` crash (godot#115171) if VKD3D-Proton hits it, with a
+workaround gated on that driver version.
 
 ### 6.5 Driver 25.3 workarounds (conditional)
 
@@ -210,7 +212,7 @@ Host (CI):
 - DRM fill: fake HAL that leaves the struct untouched → filled from stat; fake HAL that
   fills it → passed through; missing node → unchanged plus diagnostic.
 - BC reporting: feature true only when all D3D BC formats are covered; false otherwise.
-- JVM: consolidated detection (Adreno / PowerVR / neither) and PowerVR session defaults.
+- JVM: consolidated detection (Adreno / PowerVR / neither) and PowerVR game defaults.
 - Existing upstream and wallentx suites stay green on the fork's Linux CI and show no
   new failures against the local Windows baseline (about 88 JVM tests fail on Windows on
   every tree for environmental reasons); none are weakened.
