@@ -6,6 +6,38 @@ Facts here are measured on the device; anything inferred says so.
 
 ---
 
+## 2026-10-11 - Baseline session: Steam's first window kills the session
+
+Build: `DroidDeck-0.3.2-aea026c.apk` (before this port's changes). Device as in Phase 0.
+Raw output: `pixel10-runs/logs-baseline-03/unpacked/2026-10-11-03-steam/`,
+`pixel10-runs/logcat-droiddeck-baseline.txt`.
+
+What the user saw: Steam downloads its update, then the app returns to the launcher. No crash dialog.
+
+Chain in `session.log`, all at 00:51:04:
+- `zink: failed drmPrimeFDToHandle Operation not supported`, repeated.
+- gamescope `wlr_linux_dmabuf_v1.c:219 Failed to import DMA-BUF FD for plane 0: Operation not
+  supported`.
+- Xwayland `error 7: importing the supplied dmabufs failed`; gamescope restarts Xwayland; the
+  X clients lose `:0` and the session ends.
+
+Measured on the device with a one-off bionic probe, shell uid (not the app sandbox):
+- PRIME FD-to-handle on `renderD128` (`pvr`) with a `/dev/dma_heap/system` buffer: `EINVAL`. This is
+  the result `tools/linuxfs/preload/drm.c` emulates, so the emulation path was taken.
+- `fcntl(F_DUPFD_QUERY)`: `EINVAL` for every pair (needs Linux 6.10; this kernel is 6.6).
+- `kcmp(KCMP_FILE)`: answers from the shell (0 for a dup, 1 for a second open). It is not in AOSP's
+  app seccomp allowlist, so inside the app it fails. Not measured in the app directly; the shim's
+  `EOPNOTSUPP` shows it returned an error there rather than killing the process.
+- DRM fdinfo for this node shows no `drm-client-id`, so it cannot tell two opens apart either.
+
+Cause: with neither identity check available, the shim refused every PowerVR import with
+`EOPNOTSUPP` (its fail-safe against a reused descriptor number). Fix on `pixel10`: when the kernel
+cannot answer, PowerVR handles match by descriptor number as KGSL's always have, and each process
+that hits this prints `droiddeck-drm: this kernel cannot compare open files ...` once. Kernels that
+can answer keep the open-file-description checks.
+
+---
+
 ## 2026-10-11 - Phase 0 and 1: device facts and property probe
 
 Device: Pixel 10 Pro (`blazer`), `google/blazer/blazer:17/CP3A.260905.009/16091614:user/release-keys`,

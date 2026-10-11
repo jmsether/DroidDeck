@@ -1412,9 +1412,9 @@ Then the user runs `python tools\pixel10\pixel10.py install <path printed by fin
 
 - [ ] **Step 3: M1 session (user)**
 
-The user starts Steam (Play), signs in, and uses Big Picture for 10 minutes with touch and a controller if available, then shares logs to Downloads; `python tools\pixel10\pixel10.py logs`, then unpack the zip as in Task 7 Step 4.
+The user starts Steam (Play), signs in, and uses Big Picture for 10 minutes with touch and a controller if available. Then `python tools\pixel10\pixel10.py logs` pulls the newest session folder over USB: fork builds are debuggable, so `run-as` reads `files/logs`. If run-as is refused, the Share logs zip saved to Download is the fallback, unpacked as in Task 7 Step 4.
 
-**Acceptance (M1):** Big Picture renders and responds for 10 minutes with no crash. Record in the bring-up log: build, `HYBRIS_DRM_PROPERTIES outcome=` line, gamescope backend, any errors.
+**Acceptance (M1):** Big Picture renders and responds for 10 minutes with no crash. Record in the bring-up log: build, `HYBRIS_DRM_PROPERTIES outcome=` line, the `droiddeck-drm:` line (expected once per process that imports buffers on this 6.6 kernel), gamescope backend, any errors.
 
 - [ ] **Step 4: If M1 fails**
 
@@ -1439,7 +1439,9 @@ Ask the user for 2–3 titles from their library: at least one Direct3D 9 and on
 
 - [ ] **Step 2: Run each with Standard graphics and no per-game settings (user)**
 
-For each title: launch from Big Picture, play 5 minutes, share logs to Downloads, `python tools\pixel10\pixel10.py logs`, unpack the zip as in Task 7 Step 4. Record per title: reached gameplay (yes/no), rough FPS from the overlay, the game's `HYBRIS_BC policy=… texture_compression=…` line (expected `policy=4 … texture_compression=1`), DXVK's adapter line, and any `IMG_vk…` frames in a crash.
+For each title: launch from Big Picture, play 5 minutes, then `python tools\pixel10\pixel10.py logs`. Record per title: reached gameplay (yes/no), rough FPS from the overlay, the game's `HYBRIS_BC policy=… texture_compression=…` line (expected `policy=4 … texture_compression=1`), DXVK's adapter line, and any `IMG_vk…` frames in a crash.
+
+Then run one of the titles once as a desktop window (the WineD3D run, `droiddeck-proton-run --window`, which sets `PROTON_USE_WINED3D=1`). It skips the graphics profile but keeps the shared PowerVR defaults, and its GL is Zink on the same Vulkan driver, so its log should show `HYBRIS_BC policy=4` too. Record whether it draws.
 
 **Acceptance (M2):** 2–3 DX9/DX11 titles reach gameplay with no per-game settings.
 
