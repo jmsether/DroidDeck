@@ -92,7 +92,9 @@ End-to-end window and Steam testing remains required before calling this tested
 support. No AVF transport is used by this candidate.
 
 `build_runtime.sh` builds the pinned upstream wrapper and our HAL-version patch
-on CI. The APK carries an isolated runtime archive, licenses, source and patch.
+on CI. The fetch-and-patch step lives in `tools/hybris/prepare_source.sh`, shared with the
+host tests in `tools/tests/test_hybris_compat.py`. The APK carries an isolated runtime
+archive, licenses, source and patch.
 `check_runtime.py` verifies the archive, AArch64 libraries and provenance before
 upload. Explicit imported driver choices are preserved; Auto selects this wrapper
 only on PowerVR devices.
