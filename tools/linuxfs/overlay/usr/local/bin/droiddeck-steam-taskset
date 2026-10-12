@@ -11,7 +11,10 @@ if [ "$#" -ge 2 ] && [[ "$1" =~ ^(0[xX])?[0-9a-fA-F]+$ ]] &&
   if ! /usr/bin/taskset -p "$mask" "$$" >/dev/null 2>&1; then
     echo "droiddeck: Steam helper CPU pinning unavailable; using the allowed CPUs" >&2
   fi
-  exec -- "$@"
+  # BL_STEAM_WEBHELPER_FLAGS (unset by default): extra Chromium switches for the helper only,
+  # split on whitespace - for trying presentation switches with no rebuild.
+  read -r -a extra <<<"${BL_STEAM_WEBHELPER_FLAGS:-}"
+  exec -- "$@" ${extra[@]+"${extra[@]}"}
 fi
 # Queries, existing-process changes, and other programs retain taskset's behavior.
 exec /usr/bin/taskset "$@"

@@ -11,7 +11,7 @@ WRAPPER = Path(__file__).resolve().parents[1] / "linuxfs/overlay/usr/local/bin/d
 
 
 class SteamHelperAffinityTest(unittest.TestCase):
-    def launch(self, status, form="helper", configured=True):
+    def launch(self, status, form="helper", configured=True, flags=None):
         with tempfile.TemporaryDirectory(prefix="droiddeck-helper-") as temporary:
             root = Path(temporary)
             helper = root / "steamwebhelper"
@@ -48,6 +48,9 @@ class SteamHelperAffinityTest(unittest.TestCase):
             env.pop("BL_STEAM_WEBHELPER", None)
             if configured:
                 env["BL_STEAM_WEBHELPER"] = str(helper)
+            env.pop("BL_STEAM_WEBHELPER_FLAGS", None)
+            if flags is not None:
+                env["BL_STEAM_WEBHELPER_FLAGS"] = flags
             result = subprocess.run(["bash", str(wrapper), *args], env=env,
                                     capture_output=True, text=True, timeout=5)
             trace = [json.loads(x) for x in (root / "trace").read_text().splitlines()]
@@ -75,6 +78,20 @@ class SteamHelperAffinityTest(unittest.TestCase):
         result, _, starts, args = self.launch(1, "alias")
         self.assertEqual(result.returncode, 23)
         self.assertEqual(starts, [args[2:]])
+
+    def test_extra_helper_flags_follow_the_helpers_own_arguments(self):
+        result, _, starts, args = self.launch(0, flags="  --disable-zero-copy  --x=1 ")
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(starts, [args[2:] + ["--disable-zero-copy", "--x=1"]])
+        for flags in ("", "   "):
+            with self.subTest(flags=repr(flags)):
+                result, _, starts, args = self.launch(0, flags=flags)
+                self.assertEqual(starts, [args[2:]])
+
+    def test_extra_helper_flags_never_reach_other_programs(self):
+        result, trace, starts, args = self.launch(47, "other", flags="--disable-zero-copy")
+        self.assertEqual(trace, [args])
+        self.assertEqual(starts, [])
 
     def test_other_taskset_forms_and_targets_pass_through(self):
         for form, configured in [("other", True), ("query", True), ("invalid", True),
